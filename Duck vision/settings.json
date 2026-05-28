@@ -1,0 +1,19 @@
+{
+  "params": {
+    "r_min": 60,
+    "g_min": 0,
+    "b_min": 0,
+    "r_max": 255,
+    "g_max": 31,
+    "b_max": 35,
+    "min_area": 500,
+    "blue_r_min": 0,
+    "blue_g_min": 40,
+    "blue_b_min": 85,
+    "blue_r_max": 49,
+    "blue_g_max": 92,
+    "blue_b_max": 146,
+    "blue_min_area": 1,
+    "blue_smoothing": 7
+  }
+}

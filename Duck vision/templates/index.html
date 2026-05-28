@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="de">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Duck Vision</title>
+		<link
+			rel="stylesheet"
+			href="{{ url_for('static', filename='css/style.css') }}"
+		/>
+	</head>
+	<body>
+		<div class="wrap">
+			<section class="card stream">
+				<img src="/video_feed" alt="Live Stream" />
+			</section>
+
+			<aside class="card panel">
+				<h1>Duck Vision</h1>
+				<p>
+					Die Regler wirken direkt auf die Farberkennung. Die aktuelle Position
+					kommt live per Socket aus dem Backend.
+				</p>
+
+				<div class="grid">
+					<div class="group">
+						<h2>R Kanal</h2>
+						<div class="field">
+							<label><span>R min</span><output id="r_min_val"></output></label
+							><input id="r_min" type="range" min="0" max="255" />
+						</div>
+
+						<div class="field">
+							<label><span>R max</span><output id="r_max_val"></output></label
+							><input id="r_max" type="range" min="0" max="255" />
+						</div>
+					</div>
+					<div class="group">
+						<h2>G Kanal</h2>
+						<div class="field">
+							<label><span>G min</span><output id="g_min_val"></output></label
+							><input id="g_min" type="range" min="0" max="255" />
+						</div>
+						<div class="field">
+							<label><span>G max</span><output id="g_max_val"></output></label
+							><input id="g_max" type="range" min="0" max="255" />
+						</div>
+					</div>
+					<div class="group">
+						<h2>B Kanal</h2>
+						<div class="field">
+							<label><span>B min</span><output id="b_min_val"></output></label
+							><input id="b_min" type="range" min="0" max="255" />
+						</div>
+						<div class="field">
+							<label><span>B max</span><output id="b_max_val"></output></label
+							><input id="b_max" type="range" min="0" max="255" />
+						</div>
+					</div>
+					<div class="group">
+						<h2>Filter</h2>
+						<div class="field">
+							<label
+								><span>Min Area</span><output id="min_area_val"></output></label
+							><input id="min_area" type="range" min="1" max="50000" />
+						</div>
+					</div>
+				</div>
+
+				<!-- Blau-Regler als eigene Gruppe -->
+				<div class="group">
+					<h2>Blau (2 größte)</h2>
+					<div class="field">
+						<label
+							><span>R min</span><output id="blue_r_min_val"></output
+						></label>
+						<input id="blue_r_min" type="range" min="0" max="255" />
+					</div>
+					<div class="field">
+						<label
+							><span>R max</span><output id="blue_r_max_val"></output
+						></label>
+						<input id="blue_r_max" type="range" min="0" max="255" />
+					</div>
+					<div class="field">
+						<label
+							><span>G min</span><output id="blue_g_min_val"></output
+						></label>
+						<input id="blue_g_min" type="range" min="0" max="255" />
+					</div>
+					<div class="field">
+						<label
+							><span>G max</span><output id="blue_g_max_val"></output
+						></label>
+						<input id="blue_g_max" type="range" min="0" max="255" />
+					</div>
+					<div class="field">
+						<label
+							><span>B min</span><output id="blue_b_min_val"></output
+						></label>
+						<input id="blue_b_min" type="range" min="0" max="255" />
+					</div>
+					<div class="field">
+						<label
+							><span>B max</span><output id="blue_b_max_val"></output
+						></label>
+						<input id="blue_b_max" type="range" min="0" max="255" />
+					</div>
+					<div class="field">
+						<label
+							><span>Min Area</span><output id="blue_min_area_val"></output
+						></label>
+						<input id="blue_min_area" type="range" min="1" max="50000" />
+					</div>
+					<div class="field">
+						<label
+							><span>Smoothing</span><output id="blue_smoothing_val"></output
+						></label>
+						<input id="blue_smoothing" type="range" min="1" max="100" />
+					</div>
+				</div>
+
+				<div class="stats">
+					<div class="stat">
+						<span>Mittelpunkt</span><strong id="center">-</strong>
+					</div>
+					<div class="stat">
+						<span>Fläche</span><strong id="area">-</strong>
+					</div>
+					<div class="stat">
+						<span>Bildgröße</span><strong id="frame_size">-</strong>
+					</div>
+					<div class="stat">
+						<span>Status</span><strong id="status">Verbunden</strong>
+					</div>
+					<div class="stat">
+						<span>Blau 1</span><strong id="blue1">-</strong>
+					</div>
+					<div class="stat">
+						<span>Blau 2</span><strong id="blue2">-</strong>
+					</div>
+					<div class="stat">
+						<span>Blue Linie X</span><strong id="blue_line_x">-</strong>
+					</div>
+					<div class="stat">
+						<span>Rot Offset X</span><strong id="red_offset">-</strong>
+					</div>
+				</div>
+
+				<div class="error" id="error"></div>
+			</aside>
+		</div>
+
+		<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+		<script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+	</body>
+</html>
