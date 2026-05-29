@@ -1,6 +1,13 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <ESP32Servo.h>
+
+Servo esc_L;
+Servo esc_R;
+
+int Motor_R = 0;
+int Motor_L = 1;
 
 struct __attribute__((packed)) StickData
 {
@@ -70,9 +77,27 @@ void setup()
 
   // Bestätige, dass der Empfänger bereit ist
   Serial.println("Empfänger bereit");
+
+  esc_L.attach(Motor_L, 1000, 2000);
+  esc_R.attach(Motor_R, 1000, 2000);
+
+  esc_L.writeMicroseconds(1000);
+  esc_R.writeMicroseconds(1000);
+  
+  delay(3000);
 }
 
 void loop()
 {
-  delay(1000);
+  esc_R.writeMicroseconds(1200); // Langsam drehen
+  esc_L.writeMicroseconds(1200); // Langsam drehen
+  delay(2000);
+
+  esc_R.writeMicroseconds(1500); // Mehr Gas
+  esc_L.writeMicroseconds(1500); // Mehr Gas
+  delay(2000);
+
+  esc_R.writeMicroseconds(1000); // Stop
+  esc_L.writeMicroseconds(1000); // Stop
+  delay(2000);
 }
