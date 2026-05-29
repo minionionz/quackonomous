@@ -291,12 +291,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len)
 {
   // MAC address des Senders ausgeben
   Serial.print("[MSG] From: ");
-  for (int i = 0; i < 6; i++)
-  {
-    printf("%02X", mac_addr[i]);
-    if (i < 5)
-      Serial.print(":");
-  }
+  print_mac_address(mac_addr);
 
   Serial.print(" | Message: ");
   if (len >= static_cast<int>(sizeof(Message)))

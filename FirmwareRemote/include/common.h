@@ -28,3 +28,12 @@ struct __attribute__((packed)) Message {
     } data;
 };
 
+void print_mac_address(const uint8_t *mac_addr) {
+  for (int i = 0; i < 6; i++) {
+    Serial.printf("%02X", mac_addr[i]);
+    if (i < 5)
+      Serial.print(":");
+  }
+  Serial.print(" ");
+}
+

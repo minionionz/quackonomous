@@ -2,7 +2,8 @@
 # Makefile for vim users :)
 #
 
-PIO_ENV=supermini
+# PIO_ENV=supermini
+PIO_ENV=esp_wroom
 
 all:
 	pio -f -c vim run -e ${PIO_ENV}
