@@ -37,7 +37,7 @@ void onSendCallback(const unsigned char*, esp_now_send_status_t status) {
 
 
 
-const int SEND_DELAY = 300;
+const int SEND_DELAY = 100;
 const int CHANNEL = 1;
 
 uint8_t broadcast[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
@@ -78,7 +78,7 @@ void setup() {
 #else
   // Set wifi channel
   esp_wifi_set_channel(CHANNEL, WIFI_SECOND_CHAN_NONE);
-  esp_now_register_send_cb(onSendCallback);
+  // esp_now_register_send_cb(onSendCallback);
 
   Serial.println("ESP-NOW initialized");
 

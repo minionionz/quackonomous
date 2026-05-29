@@ -268,7 +268,7 @@ float prev_millis = 0;
 static void driveEscFromStick(const StickData &stickData)
 {
   // For calculating acceleration based on time
-  float delta = millis() - prev_millis;
+  float delta = (millis() - prev_millis) / 1000.0;
   prev_millis = millis();
   accelerating_since += delta;
 
@@ -280,7 +280,6 @@ static void driveEscFromStick(const StickData &stickData)
       bool_str(was_going_left),
       bool_str(was_going_right)
   );
-  sleep(500);
 
   // Reset motors when not receiving anything for some time
   if (millis() - time_last_received > TIMEOUT_STOP_AFTER_RECV) {
@@ -293,8 +292,8 @@ static void driveEscFromStick(const StickData &stickData)
   const int y = stickData.y;
 
   // Values sent by the remote. Ranges from 0 to 1
-  int goalMotorLeft  = 0;
-  int goalMotorRight = 0;
+  float goalMotorLeft  = 0;
+  float goalMotorRight = 0;
 
   /* Map data to motor direction */
   float throttle = 0;
@@ -306,12 +305,12 @@ static void driveEscFromStick(const StickData &stickData)
   // Driving right: goalMotorLeft>LEAST
   if (x < X_NEUTRAL - X_DEADZONE)
   {
-    steeringDelta =   STEERING_STRENGTH * constrain(map(x, X_NEUTRAL - X_DEADZONE, X_MIN, 0, FULL), 0, FULL) / (float) FULL;
+    steeringDelta =   STEERING_STRENGTH * (constrain(map(x, X_NEUTRAL - X_DEADZONE, X_MIN, 0, FULL), 0, FULL) / (float) FULL);
   }
   // Driving left: goalMotorRight>LEAST
   else if (x > X_NEUTRAL + X_DEADZONE)
   {
-    steeringDelta = - STEERING_STRENGTH * constrain(map(x, X_NEUTRAL + X_DEADZONE, X_MAX, 0, FULL), 0, FULL) / (float) FULL;
+    steeringDelta = - STEERING_STRENGTH * (constrain(map(x, X_NEUTRAL + X_DEADZONE, X_MAX, 0, FULL), 0, FULL) / (float) FULL);
   }
   // TODO: Maybe switch them, idk
   goalMotorLeft  = throttle + steeringDelta;
@@ -322,12 +321,11 @@ static void driveEscFromStick(const StickData &stickData)
   bool is_going_left    = goalMotorLeft  > (goalMotorRight + DIFF_BUFFER);
   bool is_going_right   = goalMotorRight > (goalMotorLeft + DIFF_BUFFER);
 
-  Serial.printf("Is going: forward: %s %d | left: %s %d | right: %s %d\n",
+  Serial.printf("Is going: Forward: %s %f | Left: %s %f | Right: %s %f\n",
       bool_str(is_going_forward), throttle,
-      bool_str(is_going_left), goalMotorLeft,
+      bool_str(is_going_left),  goalMotorLeft,
       bool_str(is_going_right), goalMotorRight
   );
-  sleep(500);
 
   // TODO: if (was_going_left && not is_going_forward) ...
   float E = 2.71; // close enough
