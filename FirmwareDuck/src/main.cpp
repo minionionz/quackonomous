@@ -8,20 +8,57 @@ Servo esc_L;
 Servo esc_R;
 
 const int X_MIN = 0;
-const int X_MAX = 4096;
+const int X_MAX = 1024;
 const int Y_MIN = 0;
-const int Y_MAX = 4096;
+const int Y_MAX = 1024;
 
 const int MOTOR_MIN = 1000; // Minimaler PWM-Wert für die Motoren
 const int MOTOR_MAX = 2000; // Maximaler PWM-Wert für die Motoren
 
-const int X_DEADZONE = 200;               // Toter Bereich für die X-Achse
-const int Y_DEADZONE = 200;               // Toter Bereich für die Y-Ach
-const int X_CENTER = (X_MAX - X_MIN) / 2; // Zentrum der X-Achse
-const int Y_CENTER = (Y_MAX - Y_MIN) / 2; // Zentrum der Y-Achse
+const int X_DEADZONE = 60; // Toter Bereich für die X-Achse
+const int Y_DEADZONE = 60; // Toter Bereich für die Y-Achse
+const int X_CENTER = 312;  // Zentrum der X-Achse
+const int Y_CENTER = 512;  // Zentrum der Y-Achse
 
 int Motor_R = 0;
 int Motor_L = 1;
+
+static int mapToEsc(int value, int inMin, int inMax)
+{
+  return constrain(map(value, inMin, inMax, MOTOR_MIN, MOTOR_MAX), MOTOR_MIN, MOTOR_MAX);
+}
+
+static void driveEscFromStick(const StickData &stickData)
+{
+  const int x = stickData.x;
+  const int y = stickData.y;
+
+  int motorLeft = MOTOR_MIN;
+  int motorRight = MOTOR_MIN;
+
+  if (x < X_CENTER - X_DEADZONE)
+  {
+    motorLeft = constrain(map(x, X_MIN, X_CENTER - X_DEADZONE, MOTOR_MAX, MOTOR_MIN), MOTOR_MIN, MOTOR_MAX);
+    motorRight = MOTOR_MIN;
+  }
+  else if (x > X_CENTER + X_DEADZONE)
+  {
+    motorLeft = MOTOR_MIN;
+    motorRight = constrain(map(x, X_CENTER + X_DEADZONE, X_MAX, MOTOR_MIN, MOTOR_MAX), MOTOR_MIN, MOTOR_MAX);
+  }
+  else
+  {
+    if (y > Y_CENTER + Y_DEADZONE)
+    {
+      const int throttle = constrain(map(y, Y_CENTER + Y_DEADZONE, Y_MAX, MOTOR_MIN, MOTOR_MAX), MOTOR_MIN, MOTOR_MAX);
+      motorLeft = throttle;
+      motorRight = throttle;
+    }
+  }
+
+  esc_L.writeMicroseconds(motorLeft);
+  esc_R.writeMicroseconds(motorRight);
+}
 
 // Callback-Funktion, die automatisch aufgerufen wird, wenn eine ESP-NOW-Nachricht empfangen wird
 // Sie erhält die MAC-Adresse des Senders und die empfangenen Daten.
@@ -36,15 +73,34 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len)
       Serial.print(":");
   }
 
-  Serial.print(" | StickData: ");
-  if (len >= static_cast<int>(sizeof(StickData)))
+  Serial.print(" | Message: ");
+  if (len >= static_cast<int>(sizeof(Message)))
   {
-    StickData stickData;
-    memcpy(&stickData, data, sizeof(StickData));
-    Serial.print("x=");
-    Serial.print(stickData.x);
-    Serial.print(", y=");
-    Serial.print(stickData.y);
+    Message message;
+    memcpy(&message, data, sizeof(Message));
+
+    Serial.print(msg_type_name(message.msg_type));
+
+    if (message.msg_type == STICK_DATA)
+    {
+      Serial.print(" x=");
+      Serial.print(message.data.stick_data.x);
+      Serial.print(", y=");
+      Serial.print(message.data.stick_data.y);
+
+      driveEscFromStick(message.data.stick_data);
+    }
+    else if (message.msg_type == QUACK)
+    {
+      Serial.print(" i=");
+      Serial.print(message.data.i);
+    }
+  }
+  else
+  {
+    Serial.print("ungültige Länge (");
+    Serial.print(len);
+    Serial.print(")");
   }
 
   Serial.print(" ");
@@ -102,5 +158,4 @@ void loop()
   // esc_R.writeMicroseconds(1000); // Stop
   // esc_L.writeMicroseconds(1000); // Stop
   delay(2000);
-}
 }
