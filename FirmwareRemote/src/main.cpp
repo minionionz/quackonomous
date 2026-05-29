@@ -22,8 +22,8 @@ const int STICK_Y = 34;
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include "common.h"
-const int STICK_X = 0;
-const int STICK_Y = 1;
+const int STICK_X = 33;
+const int STICK_Y = 34;
 esp_now_peer_info_t peer_info = {};
 void onSendCallback(const unsigned char*, esp_now_send_status_t status) {
   if (status == ESP_NOW_SEND_SUCCESS) {
@@ -55,7 +55,6 @@ void setup() {
   Serial.begin(115200);
 
   WiFi.mode(WIFI_STA);
-  delay(2000); // Delay for monitor
 
   // Eigene MAC anzeigen (praktisch zum Kopieren).
   Serial.print("Sender MAC: ");
@@ -81,8 +80,10 @@ void setup() {
   esp_wifi_set_channel(CHANNEL, WIFI_SECOND_CHAN_NONE);
   esp_now_register_send_cb(onSendCallback);
 
+  Serial.println("ESP-NOW initialized");
+
   // Register receiver as peer
-  peer_info.channel = 0;            // or the AP channel (1-11)
+  peer_info.channel = 1;            // or the AP channel (1-11)
   peer_info.ifidx = WIFI_IF_STA;
   peer_info.encrypt = false;
   memcpy(&peer_info.peer_addr, active_mac, 6);
@@ -97,11 +98,17 @@ void setup() {
 
   Serial.println("ESP-NOW ready");
   // Pin Setup
+  delay(500);
   pinMode(STICK_X, INPUT);
   pinMode(STICK_Y, INPUT);
+
+  Serial.println("Setup complete");
+  delay(500);
 }
 
 void loop() {
+  Serial.println("Reading stick values...");
+  delay(500);
   uint16_t xValue = analogRead(STICK_X);
   uint16_t yValue = analogRead(STICK_Y);
 
