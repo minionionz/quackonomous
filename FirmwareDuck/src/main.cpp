@@ -52,6 +52,9 @@ const unsigned long SENSOR_GAP_MS = 40;
 
 unsigned long lastMqttReconnectAttempt = 0;
 unsigned long lastSensorReadMs = 0;
+unsigned long lastPacketReceivedMs = 0;
+bool motorsStoppedByTimeout = false;
+const unsigned long PACKET_TIMEOUT_MS = 2000;
 
 static uint8_t getEspNowChannel()
 {
@@ -136,8 +139,8 @@ static void readAndPublishSensors()
   appendDistanceJsonValue(payload, distance3);
   payload += "}";
 
-  Serial.print("[SENSORS] ");
-  Serial.println(payload);
+  // Serial.print("[SENSORS] ");
+  // Serial.println(payload);
 
   publishState(MQTT_SENSORS_TOPIC, payload);
 }
@@ -309,6 +312,12 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len)
       Serial.print(message.data.stick_data.y);
 
       driveEscFromStick(message.data.stick_data);
+      lastPacketReceivedMs = millis();
+      if (motorsStoppedByTimeout)
+      {
+        motorsStoppedByTimeout = false;
+        publishState(MQTT_STATUS_TOPIC, "motors resumed");
+      }
     }
     else if (message.msg_type == QUACK)
     {
@@ -319,6 +328,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len)
       {
         publishState(MQTT_QUACK_TOPIC, String(message.data.i));
       }
+      lastPacketReceivedMs = millis();
     }
   }
   else
@@ -401,6 +411,18 @@ void loop()
   {
     lastSensorReadMs = now;
     readAndPublishSensors();
+  }
+
+  // Motoren stoppen, wenn seit PACKET_TIMEOUT_MS keine Pakete gekommen sind
+  if (lastPacketReceivedMs != 0 && (now - lastPacketReceivedMs > PACKET_TIMEOUT_MS))
+  {
+    if (!motorsStoppedByTimeout)
+    {
+      esc_L.writeMicroseconds(MOTOR_MIN);
+      esc_R.writeMicroseconds(MOTOR_MIN);
+      motorsStoppedByTimeout = true;
+      publishState(MQTT_STATUS_TOPIC, "motors timeout");
+    }
   }
 
   delay(10);
