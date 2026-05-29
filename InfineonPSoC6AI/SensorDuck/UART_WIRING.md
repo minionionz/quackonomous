@@ -1,6 +1,6 @@
 # UART WIRING
 ## Wiring PSoC6 → ESP32 Feather:
-
+```
 ┌────────────────────────┬─────────────────┬────────────────────────────────┐
 │   CY8CKIT-062S2-AI     │  ESP32 Feather  │              Note              │
 │    (Arduino header)    │                 │                                │
@@ -14,6 +14,7 @@
 ├────────────────────────┼─────────────────┼────────────────────────────────┤
 │ GND                    │ GND             │ Required — common ground       │
 └────────────────────────┴─────────────────┴────────────────────────────────┘
+```
 
 Both sides are 3.3 V logic so no level shifting needed. On the ESP32 side use Serial2.begin(115200) and read lines with Serial2.readStringUntil('\n'), then parse with ArduinoJson. The "imu":true,"mag":true fields let you skip malformed packets.
 
