@@ -2,7 +2,7 @@
 # Makefile for vim users :)
 #
 
-PIO_ENV=
+PIO_ENV=-e featheresp32
 
 all:
 	pio -f -c vim run ${PIO_ENV}
