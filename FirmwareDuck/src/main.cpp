@@ -26,7 +26,7 @@ const int Y_CENTER = 512;  // Zentrum der Y-Achse
 
 const int Motor_R = 16;
 const int Motor_L = 4;
-const uint8_t WIFI_CHANNEL = 6;
+const uint8_t DEFAULT_ESPNOW_CHANNEL = 6;
 
 const char *WIFI_SSID = "Ducknet";
 const char *WIFI_PASSWORD = "Ducknet123";
@@ -38,12 +38,34 @@ const char *MQTT_STATUS_TOPIC = "duck/status";
 const char *MQTT_STICK_TOPIC = "duck/stick";
 const char *MQTT_QUACK_TOPIC = "duck/quack";
 const char *MQTT_COMMAND_TOPIC = "duck/cmd";
+const char *MQTT_SENSORS_TOPIC = "duck/sensors";
+
+const int SENSOR_1_TRIG = 17;
+const int SENSOR_1_ECHO = 5;
+const int SENSOR_2_TRIG = 18;
+const int SENSOR_2_ECHO = 19;
+const int SENSOR_3_TRIG = 21;
+const int SENSOR_3_ECHO = 22;
+
+const unsigned long SENSOR_READ_INTERVAL_MS = 200;
+const unsigned long SENSOR_GAP_MS = 40;
 
 unsigned long lastMqttReconnectAttempt = 0;
+unsigned long lastSensorReadMs = 0;
 
-static void applyWifiChannel()
+static uint8_t getEspNowChannel()
 {
-  esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    return WiFi.channel();
+  }
+
+  return DEFAULT_ESPNOW_CHANNEL;
+}
+
+static void applyWifiChannel(uint8_t channel)
+{
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 }
 
 static void publishState(const char *topic, const String &payload)
@@ -52,6 +74,72 @@ static void publishState(const char *topic, const String &payload)
   {
     mqttClient.publish(topic, payload.c_str(), true);
   }
+}
+
+static float readDistanceCm(int trigPin, int echoPin)
+{
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  const unsigned long duration = pulseIn(echoPin, HIGH, 30000);
+  if (duration == 0)
+  {
+    return -1.0f;
+  }
+
+  return static_cast<float>(duration) * 0.0343f * 0.5f;
+}
+
+static void appendDistanceJsonValue(String &json, float distanceCm)
+{
+  if (distanceCm < 0.0f)
+  {
+    json += "null";
+  }
+  else
+  {
+    json += String(distanceCm, 1);
+  }
+}
+
+static void setupSensorPins()
+{
+  pinMode(SENSOR_1_TRIG, OUTPUT);
+  pinMode(SENSOR_1_ECHO, INPUT);
+  pinMode(SENSOR_2_TRIG, OUTPUT);
+  pinMode(SENSOR_2_ECHO, INPUT);
+  pinMode(SENSOR_3_TRIG, OUTPUT);
+  pinMode(SENSOR_3_ECHO, INPUT);
+
+  digitalWrite(SENSOR_1_TRIG, LOW);
+  digitalWrite(SENSOR_2_TRIG, LOW);
+  digitalWrite(SENSOR_3_TRIG, LOW);
+}
+
+static void readAndPublishSensors()
+{
+  const float distance1 = readDistanceCm(SENSOR_1_TRIG, SENSOR_1_ECHO);
+  delay(SENSOR_GAP_MS);
+  const float distance2 = readDistanceCm(SENSOR_2_TRIG, SENSOR_2_ECHO);
+  delay(SENSOR_GAP_MS);
+  const float distance3 = readDistanceCm(SENSOR_3_TRIG, SENSOR_3_ECHO);
+
+  String payload = "{";
+  payload += "\"sensor_1_cm\":";
+  appendDistanceJsonValue(payload, distance1);
+  payload += ",\"sensor_2_cm\":";
+  appendDistanceJsonValue(payload, distance2);
+  payload += ",\"sensor_3_cm\":";
+  appendDistanceJsonValue(payload, distance3);
+  payload += "}";
+
+  Serial.print("[SENSORS] ");
+  Serial.println(payload);
+
+  publishState(MQTT_SENSORS_TOPIC, payload);
 }
 
 static void mqttCallback(char *topic, byte *payload, unsigned int length)
@@ -88,8 +176,8 @@ static void connectToWiFi()
 
   Serial.print("Verbinde mit WiFi ");
   Serial.println(WIFI_SSID);
+  WiFi.setSleep(false);
   WiFi.mode(WIFI_STA);
-  applyWifiChannel();
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   unsigned long start = millis();
@@ -102,9 +190,11 @@ static void connectToWiFi()
 
   if (WiFi.status() == WL_CONNECTED)
   {
-    applyWifiChannel();
+    applyWifiChannel(getEspNowChannel());
     Serial.print("WiFi verbunden, IP: ");
     Serial.println(WiFi.localIP());
+    Serial.print("Aktiver Kanal: ");
+    Serial.println(WiFi.channel());
   }
   else
   {
@@ -251,6 +341,9 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len)
 void setup()
 {
   Serial.begin(115200);
+  WiFi.setSleep(false);
+
+  setupSensorPins();
 
   connectToWiFi();
   delay(2000); // Delay for monitor
@@ -261,7 +354,7 @@ void setup()
   Serial.println(WiFi.macAddress());
 
   // Initialisiere ESP-NOW
-  applyWifiChannel();
+  applyWifiChannel(getEspNowChannel());
   if (esp_now_init() != ESP_OK)
   {
     Serial.println("ESP-NOW Fehler");
@@ -294,6 +387,10 @@ void loop()
   {
     connectToWiFi();
   }
+  else
+  {
+    applyWifiChannel(getEspNowChannel());
+  }
 
   if (!mqttClient.connected())
   {
@@ -304,5 +401,12 @@ void loop()
     mqttClient.loop();
   }
 
-  delay(2000);
+  const unsigned long now = millis();
+  if (now - lastSensorReadMs >= SENSOR_READ_INTERVAL_MS)
+  {
+    lastSensorReadMs = now;
+    readAndPublishSensors();
+  }
+
+  delay(10);
 }
