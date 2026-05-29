@@ -301,7 +301,7 @@ static void driveEscFromStick(const StickData &stickData)
   {
     throttle      = constrain(map(y, Y_NEUTRAL + Y_DEADZONE, Y_MAX, 0, FULL), 0, FULL) / (float)FULL;
   }
-  int steeringDelta = 0;
+  float steeringDelta = 0;
   // Driving right: goalMotorLeft>LEAST
   if (x < X_NEUTRAL - X_DEADZONE)
   {
@@ -313,24 +313,28 @@ static void driveEscFromStick(const StickData &stickData)
     steeringDelta = - STEERING_STRENGTH * (constrain(map(x, X_NEUTRAL + X_DEADZONE, X_MAX, 0, FULL), 0, FULL) / (float) FULL);
   }
   // TODO: Maybe switch them, idk
-  goalMotorLeft  = throttle + steeringDelta;
-  goalMotorRight = throttle - steeringDelta;
+  Serial.printf("THROT: %f | DELTA: %f\n", throttle, steeringDelta);
+  // Add steering speed as a bias, so we don't get negative values when turning
+  throttle += (1+STEERING_STRENGTH);
+  goalMotorLeft  = throttle - steeringDelta;
+  goalMotorRight = throttle + steeringDelta;
 
   const int DIFF_BUFFER = 200;
   bool is_going_forward = goalMotorLeft > 0 && goalMotorRight >  0;
   bool is_going_left    = goalMotorLeft  > (goalMotorRight + DIFF_BUFFER);
   bool is_going_right   = goalMotorRight > (goalMotorLeft + DIFF_BUFFER);
-
-  Serial.printf("Is going: Forward: %s %f | Left: %s %f | Right: %s %f\n",
-      bool_str(is_going_forward), throttle,
-      bool_str(is_going_left),  goalMotorLeft,
-      bool_str(is_going_right), goalMotorRight
-  );
+  //
+  // Serial.printf("Is going: Forward: %s %f | Left: %s %f | Right: %s %f\n",
+  //     bool_str(is_going_forward), throttle,
+  //     bool_str(is_going_left),  goalMotorLeft,
+  //     bool_str(is_going_right), goalMotorRight
+  // );
 
   // TODO: if (was_going_left && not is_going_forward) ...
   float E = 2.71; // close enough
   // from 0 to 1.
   float accelProgress = constrain(pow(E, (accelerating_since / SECS_ZEROTOMAX) - 1), 0.0, throttle);
+  Serial.printf("GOING: %f\n", accelProgress);
 
   // from 0 to 1
   // currentMotorLeft  = constrain(accelProgress, 0, goalMotorLeft);
@@ -341,11 +345,11 @@ static void driveEscFromStick(const StickData &stickData)
   // currentMotorLeft += epsilon;
   // currentMotorLeft = (currentMotorLeft + 1 * ACCEL ) - 1;
   // constrain(currentMotorLeft, 0, 1);
-  Serial.printf("Left Motor going at percantag: %f %%\n", currentMotorLeft);
+  Serial.printf("Left Motor going at: %f %%  |  ", currentMotorLeft);
   // currentMotorRight += epsilon;
   // currentMotorRight = ((currentMotorRight + 1) * ACCEL ) - 1;
   // constrain(currentMotorRight, 0, 1);
-  Serial.printf("Right Motor going at percantag: %f %%\n", currentMotorRight);
+  Serial.printf("Right Motor going at: %f %%\n", currentMotorRight);
 
 
   esc_L.writeMicroseconds(MOTOR_MIN + currentMotorLeft  * (MOTOR_MAX - MOTOR_MIN));
