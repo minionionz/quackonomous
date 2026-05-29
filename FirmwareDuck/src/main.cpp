@@ -7,6 +7,19 @@
 Servo esc_L;
 Servo esc_R;
 
+const int X_MIN = 0;
+const int X_MAX = 4096;
+const int Y_MIN = 0;
+const int Y_MAX = 4096;
+
+const int MOTOR_MIN = 1000; // Minimaler PWM-Wert für die Motoren
+const int MOTOR_MAX = 2000; // Maximaler PWM-Wert für die Motoren
+
+const int X_DEADZONE = 200;               // Toter Bereich für die X-Achse
+const int Y_DEADZONE = 200;               // Toter Bereich für die Y-Ach
+const int X_CENTER = (X_MAX - X_MIN) / 2; // Zentrum der X-Achse
+const int Y_CENTER = (Y_MAX - Y_MIN) / 2; // Zentrum der Y-Achse
+
 int Motor_R = 0;
 int Motor_L = 1;
 
@@ -23,21 +36,11 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len)
       Serial.print(":");
   }
 
-  Message msg;
-  memcpy(&msg, data, len);
-  Serial.printf("[MSG] Message received. Type: %s\n", msg_type_name(msg.msg_type));
-  // Idk how unions are handled
-  /*
-  if (len < static_cast<int>(sizeof(Message)))
+  Serial.print(" | StickData: ");
+  if (len >= static_cast<int>(sizeof(StickData)))
   {
-    Serial.print("ungültige Länge (");
-    Serial.print(len);
-    Serial.print(")");
-  }
-  */
-  if (msg.msg_type == STICK_DATA) {
-    Serial.print(" | StickData: ");
-    StickData stickData = msg.data.stick_data;
+    StickData stickData;
+    memcpy(&stickData, data, sizeof(StickData));
     Serial.print("x=");
     Serial.print(stickData.x);
     Serial.print(", y=");
@@ -82,22 +85,22 @@ void setup()
 
   esc_L.writeMicroseconds(1000);
   esc_R.writeMicroseconds(1000);
-  
+
   delay(3000);
 }
 
 void loop()
 {
-  esc_R.writeMicroseconds(1200); // Langsam drehen
-  esc_L.writeMicroseconds(1200); // Langsam drehen
-  delay(2000);
+  // esc_R.writeMicroseconds(1200); // Langsam drehen
+  // esc_L.writeMicroseconds(1200); // Langsam drehen
+  // delay(2000);
 
-  esc_R.writeMicroseconds(1500); // Mehr Gas
-  esc_L.writeMicroseconds(1500); // Mehr Gas
-  delay(2000);
+  // esc_R.writeMicroseconds(1500); // Mehr Gas
+  // esc_L.writeMicroseconds(1500); // Mehr Gas
+  // delay(2000);
 
-  esc_R.writeMicroseconds(1000); // Stop
-  esc_L.writeMicroseconds(1000); // Stop
+  // esc_R.writeMicroseconds(1000); // Stop
+  // esc_L.writeMicroseconds(1000); // Stop
   delay(2000);
 }
 }
