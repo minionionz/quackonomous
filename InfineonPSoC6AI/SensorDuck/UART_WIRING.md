@@ -66,7 +66,7 @@ void loop() {
     // use the values here, e.g.:
     Serial.printf("t=%lu  hdg=%.1f°  yaw=%.2f dps\n", t, heading, gyro_z);
 }
-’’’
+```
 
 A few things to note:
 
@@ -74,3 +74,13 @@ A few things to note:
 - Check doc["ok"] before using values — during the first ~500 ms after boot the sensors may not be ready yet.
 - JsonDocument (no size parameter) is ArduinoJson 7. If you're on v6 use StaticJsonDocument<256> doc; instead.
 - For steering you'll mostly care about mag.hdg (where are we pointing) and imu.gyro.z (how fast are we turning). The accel and mag field X/Y/Z are there when you want tilt compensation later.
+
+## Magnet data hints
+
+### Why does mag.field have X/Y/Z?
+
+The magnetometer measures the full 3D magnetic field vector, not a heading directly. Heading is computed as atan2(field.y, field.x) — but that formula only gives the correct compass bearing when the board is perfectly flat. The moment the duck tilts (waves, acceleration), the answer drifts.
+
+field.z (the vertical dip component) lets the ESP32 do tilt-compensated heading by combining all three magnetic field components with the IMU accelerometer. The formula rotates the magnetic vector out of the tilted frame back into the horizontal plane before computing the angle. Without Z you can't do that.
+
+So the short version: hdg is the fast and easy bearing, fine for calm water. If you want accurate heading while the duck is rocking, the ESP32 can compute a corrected heading from field.x/y/z + imu.accel.x/y/z.
