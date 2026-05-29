@@ -13,7 +13,7 @@ const int Y_MIN = 0;
 const int Y_MAX = 1024;
 
 const int MOTOR_MIN = 1000; // Minimaler PWM-Wert für die Motoren
-const int MOTOR_MAX = 2000; // Maximaler PWM-Wert für die Motoren
+const int MOTOR_MAX = 1300; // Maximaler PWM-Wert für die Motoren
 
 const int X_DEADZONE = 60; // Toter Bereich für die X-Achse
 const int Y_DEADZONE = 60; // Toter Bereich für die Y-Achse
