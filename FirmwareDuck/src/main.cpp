@@ -21,8 +21,8 @@ const int MOTOR_MAX = 1300; // Maximaler PWM-Wert für die Motoren
 
 const int X_DEADZONE = 80;  // Toter Bereich um die X-Nullstellung
 const int Y_DEADZONE = 80;  // Toter Bereich um die Y-Nullstellung
-const int X_NEUTRAL = 1170; // Gemessene X-Nullstellung
-const int Y_NEUTRAL = 1230; // Gemessene Y-Nullstellung
+const int X_NEUTRAL = 1840; // Gemessene X-Nullstellung
+const int Y_NEUTRAL = 1880; // Gemessene Y-Nullstellung
 const int STEERING_MAX_DELTA = 180;
 
 const int Motor_R = 16;
