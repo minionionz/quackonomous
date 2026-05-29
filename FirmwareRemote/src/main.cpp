@@ -13,8 +13,8 @@ typedef int esp_err_t;
 #define ESP_FAIL -1
 #define pdMS_TO_TICKS(ms) (ms) // no FreeRTOS ticks on ESP8266
 
-const int STICK_X = A0;
-const int STICK_Y = D1;
+const int STICK_X = 33;
+const int STICK_Y = 34;
 
 #else
 /* ESP32 */

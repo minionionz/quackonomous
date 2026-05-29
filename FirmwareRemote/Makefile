@@ -3,7 +3,7 @@
 #
 
 # PIO_ENV=supermini
-PIO_ENV=esp_wroom
+PIO_ENV=esp_wroom32
 
 all:
 	pio -f -c vim run -e ${PIO_ENV}
