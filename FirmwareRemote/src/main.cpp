@@ -22,8 +22,8 @@ const int STICK_Y = 34;
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include "common.h"
-const int STICK_X = 33;
-const int STICK_Y = 34;
+const int STICK_X = 34;
+const int STICK_Y = 33;
 esp_now_peer_info_t peer_info = {};
 void onSendCallback(const unsigned char*, esp_now_send_status_t status) {
   if (status == ESP_NOW_SEND_SUCCESS) {
@@ -107,8 +107,6 @@ void setup() {
 }
 
 void loop() {
-  Serial.println("Reading stick values...");
-  delay(500);
   uint16_t xValue = analogRead(STICK_X);
   uint16_t yValue = analogRead(STICK_Y);
 

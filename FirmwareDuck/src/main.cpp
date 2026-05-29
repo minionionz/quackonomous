@@ -12,21 +12,22 @@ WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
 const int X_MIN = 0;
-const int X_MAX = 1024;
+const int X_MAX = 4096;
 const int Y_MIN = 0;
-const int Y_MAX = 1024;
+const int Y_MAX = 4096;
 
 const int MOTOR_MIN = 1000; // Minimaler PWM-Wert für die Motoren
 const int MOTOR_MAX = 1300; // Maximaler PWM-Wert für die Motoren
 
-const int X_DEADZONE = 60; // Toter Bereich für die X-Achse
-const int Y_DEADZONE = 60; // Toter Bereich für die Y-Achse
-const int X_CENTER = 312;  // Zentrum der X-Achse
-const int Y_CENTER = 512;  // Zentrum der Y-Achse
+const int X_DEADZONE = 80;  // Toter Bereich um die X-Nullstellung
+const int Y_DEADZONE = 80;  // Toter Bereich um die Y-Nullstellung
+const int X_NEUTRAL = 1170; // Gemessene X-Nullstellung
+const int Y_NEUTRAL = 1230; // Gemessene Y-Nullstellung
+const int STEERING_MAX_DELTA = 180;
 
 const int Motor_R = 16;
 const int Motor_L = 4;
-const uint8_t DEFAULT_ESPNOW_CHANNEL = 6;
+const uint8_t DEFAULT_ESPNOW_CHANNEL = 1;
 
 const char *WIFI_SSID = "Ducknet";
 const char *WIFI_PASSWORD = "Ducknet123";
@@ -53,8 +54,9 @@ const unsigned long SENSOR_GAP_MS = 40;
 unsigned long lastMqttReconnectAttempt = 0;
 unsigned long lastSensorReadMs = 0;
 unsigned long lastPacketReceivedMs = 0;
+unsigned long lastStickPacketReceivedMs = 0;
 bool motorsStoppedByTimeout = false;
-const unsigned long PACKET_TIMEOUT_MS = 2000;
+const unsigned long PACKET_TIMEOUT_MS = 20000;
 
 static uint8_t getEspNowChannel()
 {
@@ -258,24 +260,29 @@ static void driveEscFromStick(const StickData &stickData)
   int motorLeft = MOTOR_MIN;
   int motorRight = MOTOR_MIN;
 
-  if (x < X_CENTER - X_DEADZONE)
+  int throttle = MOTOR_MIN;
+  if (y > Y_NEUTRAL + Y_DEADZONE)
   {
-    motorLeft = constrain(map(x, X_MIN, X_CENTER - X_DEADZONE, MOTOR_MAX, MOTOR_MIN), MOTOR_MIN, MOTOR_MAX);
-    motorRight = MOTOR_MIN;
+    throttle = constrain(map(y, Y_NEUTRAL + Y_DEADZONE, Y_MAX, MOTOR_MIN, MOTOR_MAX), MOTOR_MIN, MOTOR_MAX);
   }
-  else if (x > X_CENTER + X_DEADZONE)
+
+  int steeringDelta = 0;
+  if (x < X_NEUTRAL - X_DEADZONE)
   {
-    motorLeft = MOTOR_MIN;
-    motorRight = constrain(map(x, X_CENTER + X_DEADZONE, X_MAX, MOTOR_MIN, MOTOR_MAX), MOTOR_MIN, MOTOR_MAX);
+    steeringDelta = constrain(map(x, X_NEUTRAL - X_DEADZONE, X_MIN, 0, STEERING_MAX_DELTA), 0, STEERING_MAX_DELTA);
+    motorLeft = constrain(throttle + steeringDelta, MOTOR_MIN, MOTOR_MAX);
+    motorRight = constrain(throttle - steeringDelta, MOTOR_MIN, MOTOR_MAX);
+  }
+  else if (x > X_NEUTRAL + X_DEADZONE)
+  {
+    steeringDelta = constrain(map(x, X_NEUTRAL + X_DEADZONE, X_MAX, 0, STEERING_MAX_DELTA), 0, STEERING_MAX_DELTA);
+    motorLeft = constrain(throttle - steeringDelta, MOTOR_MIN, MOTOR_MAX);
+    motorRight = constrain(throttle + steeringDelta, MOTOR_MIN, MOTOR_MAX);
   }
   else
   {
-    if (y > Y_CENTER + Y_DEADZONE)
-    {
-      const int throttle = constrain(map(y, Y_CENTER + Y_DEADZONE, Y_MAX, MOTOR_MIN, MOTOR_MAX), MOTOR_MIN, MOTOR_MAX);
-      motorLeft = throttle;
-      motorRight = throttle;
-    }
+    motorLeft = throttle;
+    motorRight = throttle;
   }
 
   esc_L.writeMicroseconds(motorLeft);
@@ -313,11 +320,12 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len)
 
       driveEscFromStick(message.data.stick_data);
       lastPacketReceivedMs = millis();
-      if (motorsStoppedByTimeout)
-      {
-        motorsStoppedByTimeout = false;
-        publishState(MQTT_STATUS_TOPIC, "motors resumed");
-      }
+      lastStickPacketReceivedMs = lastPacketReceivedMs;
+      // if (motorsStoppedByTimeout)
+      // {
+      //   motorsStoppedByTimeout = false;
+      //   publishState(MQTT_STATUS_TOPIC, "motors resumed");
+      // }
     }
     else if (message.msg_type == QUACK)
     {
@@ -413,17 +421,17 @@ void loop()
     readAndPublishSensors();
   }
 
-  // Motoren stoppen, wenn seit PACKET_TIMEOUT_MS keine Pakete gekommen sind
-  if (lastPacketReceivedMs != 0 && (now - lastPacketReceivedMs > PACKET_TIMEOUT_MS))
-  {
-    if (!motorsStoppedByTimeout)
-    {
-      esc_L.writeMicroseconds(MOTOR_MIN);
-      esc_R.writeMicroseconds(MOTOR_MIN);
-      motorsStoppedByTimeout = true;
-      publishState(MQTT_STATUS_TOPIC, "motors timeout");
-    }
-  }
+  // // Motoren stoppen, wenn seit PACKET_TIMEOUT_MS keine Fahrdaten mehr kamen
+  // if (lastStickPacketReceivedMs != 0 && (now - lastStickPacketReceivedMs > PACKET_TIMEOUT_MS))
+  // {
+  //   if (!motorsStoppedByTimeout)
+  //   {
+  //     esc_L.writeMicroseconds(MOTOR_MIN);
+  //     esc_R.writeMicroseconds(MOTOR_MIN);
+  //     motorsStoppedByTimeout = true;
+  //     publishState(MQTT_STATUS_TOPIC, "motors timeout");
+  //   }
+  // }
 
   delay(10);
 }
