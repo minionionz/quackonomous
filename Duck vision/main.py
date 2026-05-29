@@ -1,5 +1,7 @@
 import argparse
 import json
+import socket
+import struct
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -32,6 +34,97 @@ def clamp_area(value: int) -> int:
 
 def clamp_percent(value: int) -> int:
     return max(1, min(100, value))
+
+
+def encode_mqtt_string(value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    return struct.pack("!H", len(encoded)) + encoded
+
+
+def encode_mqtt_remaining_length(length: int) -> bytes:
+    encoded = bytearray()
+    while True:
+        digit = length % 128
+        length //= 128
+        if length > 0:
+            digit |= 0x80
+        encoded.append(digit)
+        if length == 0:
+            break
+    return bytes(encoded)
+
+
+class MqttPublisher:
+    def __init__(self, host: str, port: int, topic: str, client_id: str):
+        self.host = host
+        self.port = port
+        self.topic = topic
+        self.client_id = client_id
+        self.keepalive = 10
+        self._lock = threading.Lock()
+        self._socket: Optional[socket.socket] = None
+
+    def close(self):
+        with self._lock:
+            if self._socket is not None:
+                try:
+                    self._socket.close()
+                finally:
+                    self._socket = None
+
+    def _connect_locked(self):
+        sock = socket.create_connection((self.host, self.port), timeout=2.0)
+        sock.settimeout(2.0)
+
+        variable_header = (
+            encode_mqtt_string("MQTT")
+            + bytes([0x04])
+            + bytes([0x02])
+            + struct.pack("!H", self.keepalive)
+        )
+        payload = encode_mqtt_string(self.client_id)
+        remaining_length = len(variable_header) + len(payload)
+        connect_packet = (
+            bytes([0x10])
+            + encode_mqtt_remaining_length(remaining_length)
+            + variable_header
+            + payload
+        )
+
+        sock.sendall(connect_packet)
+
+        connack = sock.recv(4)
+        if len(connack) < 4 or connack[0] != 0x20 or connack[3] != 0x00:
+            sock.close()
+            raise ConnectionError("MQTT-Verbindung wurde vom Broker abgelehnt.")
+
+        self._socket = sock
+
+    def publish_json(self, payload: dict):
+        message = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+        variable_header = encode_mqtt_string(self.topic)
+        remaining_length = len(variable_header) + len(message)
+        publish_packet = (
+            bytes([0x30])
+            + encode_mqtt_remaining_length(remaining_length)
+            + variable_header
+            + message
+        )
+
+        with self._lock:
+            if self._socket is None:
+                self._connect_locked()
+
+            try:
+                assert self._socket is not None
+                self._socket.sendall(publish_packet)
+            except OSError:
+                self.close()
+                self._connect_locked()
+                assert self._socket is not None
+                self._socket.sendall(publish_packet)
 
 
 @dataclass
@@ -94,7 +187,15 @@ class DetectionParams:
 
 
 class VideoProcessor:
-    def __init__(self, source, settings_path: Path):
+    def __init__(
+        self,
+        source,
+        settings_path: Path,
+        mqtt_host: str = "localhost",
+        mqtt_port: int = 1883,
+        mqtt_topic: str = "duck/vision/state",
+        mqtt_interval: float = 0.2,
+    ):
         self.source = source
         self.settings_path = settings_path
         self.params = DetectionParams()
@@ -103,6 +204,15 @@ class VideoProcessor:
         self.thread = None
         self.capture = None
         self.socketio: Optional[SocketIO] = None
+        self.mqtt_publisher = MqttPublisher(
+            mqtt_host,
+            mqtt_port,
+            mqtt_topic,
+            client_id=f"duck-vision-{int(time.time() * 1000)}",
+        )
+        self.mqtt_interval = mqtt_interval
+        self.mqtt_thread: Optional[threading.Thread] = None
+        self.mqtt_running = False
         self.latest_jpeg = None
         self.latest_center = None
         self.latest_area = 0
@@ -177,10 +287,18 @@ class VideoProcessor:
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
+        self.mqtt_running = True
+        self.mqtt_thread = threading.Thread(target=self._mqtt_loop, daemon=True)
+        self.mqtt_thread.start()
+
     def stop(self):
         self.running = False
+        self.mqtt_running = False
         if self.thread is not None:
             self.thread.join(timeout=2.0)
+        if self.mqtt_thread is not None:
+            self.mqtt_thread.join(timeout=2.0)
+        self.mqtt_publisher.close()
         if self.capture is not None:
             self.capture.release()
 
@@ -235,6 +353,11 @@ class VideoProcessor:
         if self.socketio is not None:
             self.socketio.emit("position_update", payload)
 
+    def _build_mqtt_payload(self) -> dict:
+        payload = self.snapshot()
+        payload["timestamp"] = time.time()
+        return payload
+
     def _smooth_center(
         self,
         prev: Optional[tuple[float, float]],
@@ -248,6 +371,23 @@ class VideoProcessor:
             prev[0] * (1.0 - a) + current[0] * a,
             prev[1] * (1.0 - a) + current[1] * a,
         )
+
+    def _mqtt_loop(self):
+        next_publish = time.monotonic()
+        while self.mqtt_running:
+            now = time.monotonic()
+            if now < next_publish:
+                time.sleep(min(0.02, next_publish - now))
+                continue
+
+            try:
+                self.mqtt_publisher.publish_json(self._build_mqtt_payload())
+            except Exception as exc:
+                print(f"MQTT-Publish fehlgeschlagen: {exc}")
+
+            next_publish += self.mqtt_interval
+            if next_publish < now:
+                next_publish = now + self.mqtt_interval
 
     def _loop(self):
         while self.running:
@@ -489,9 +629,38 @@ def main() -> None:
     parser.add_argument(
         "--port", default=5000, type=int, help="Port fuer den Webserver"
     )
+    parser.add_argument(
+        "--mqtt-host",
+        default="localhost",
+        help="MQTT-Broker Host",
+    )
+    parser.add_argument(
+        "--mqtt-port",
+        default=1883,
+        type=int,
+        help="MQTT-Broker Port",
+    )
+    parser.add_argument(
+        "--mqtt-topic",
+        default="duck/vision/state",
+        help="MQTT Topic fuer die Daten",
+    )
+    parser.add_argument(
+        "--mqtt-interval",
+        default=0.2,
+        type=float,
+        help="Sendeintervall in Sekunden",
+    )
     args = parser.parse_args()
 
-    processor = VideoProcessor(parse_source(args.source), SETTINGS_FILE)
+    processor = VideoProcessor(
+        parse_source(args.source),
+        SETTINGS_FILE,
+        mqtt_host=args.mqtt_host,
+        mqtt_port=args.mqtt_port,
+        mqtt_topic=args.mqtt_topic,
+        mqtt_interval=args.mqtt_interval,
+    )
     app, socketio = build_app(processor)
 
     processor.start()
