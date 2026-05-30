@@ -3,6 +3,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <ESP32Servo.h>
+#include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include "common.h"
 
@@ -40,6 +41,9 @@ const char *MQTT_STICK_TOPIC = "duck/stick";
 const char *MQTT_QUACK_TOPIC = "duck/quack";
 const char *MQTT_COMMAND_TOPIC = "duck/cmd";
 const char *MQTT_SENSORS_TOPIC = "duck/sensors";
+const char *MQTT_SWITCH_TOPIC = "duck/switch";
+const char *MQTT_VISION_STATE_TOPIC = "duck/vision/state";
+const char *MQTT_UART_SENSOR_TOPIC = "duck/uart/state";
 
 const int SENSOR_1_TRIG = 17;
 const int SENSOR_1_ECHO = 5;
@@ -48,15 +52,23 @@ const int SENSOR_2_ECHO = 19;
 const int SENSOR_3_TRIG = 21;
 const int SENSOR_3_ECHO = 22;
 
+const int UART_SENSOR_RX_PIN = 26;
+const int UART_SENSOR_TX_PIN = 27;
+
+const int SWITCH_PIN = 15;
+
 const unsigned long SENSOR_READ_INTERVAL_MS = 200;
 const unsigned long SENSOR_GAP_MS = 40;
 
 unsigned long lastMqttReconnectAttempt = 0;
 unsigned long lastSensorReadMs = 0;
+unsigned long lastUartSensorReadMs = 0;
 unsigned long lastPacketReceivedMs = 0;
-unsigned long lastStickPacketReceivedMs = 0;
-bool motorsStoppedByTimeout = false;
-const unsigned long PACKET_TIMEOUT_MS = 20000;
+float lastRedOffsetToBlueLine = 0.0f;
+bool switchStableState = HIGH;
+bool switchLastReading = HIGH;
+unsigned long switchLastDebounceMs = 0;
+String uartSensorLineBuffer;
 
 static uint8_t getEspNowChannel()
 {
@@ -78,6 +90,31 @@ static void publishState(const char *topic, const String &payload)
   if (mqttClient.connected())
   {
     mqttClient.publish(topic, payload.c_str(), true);
+  }
+}
+
+static void onSwitchToggled(bool switchIsActive)
+{
+  Serial.print("[SWITCH] Zustand: ");
+  Serial.println(switchIsActive ? "ON" : "OFF");
+
+  publishState(MQTT_SWITCH_TOPIC, switchIsActive ? "on" : "off");
+}
+
+static void updateSwitchState()
+{
+  const bool reading = digitalRead(SWITCH_PIN);
+
+  if (reading != switchLastReading)
+  {
+    switchLastDebounceMs = millis();
+    switchLastReading = reading;
+  }
+
+  if ((millis() - switchLastDebounceMs) > 50 && reading != switchStableState)
+  {
+    switchStableState = reading;
+    onSwitchToggled(switchStableState == LOW);
   }
 }
 
@@ -141,10 +178,166 @@ static void readAndPublishSensors()
   appendDistanceJsonValue(payload, distance3);
   payload += "}";
 
-  // Serial.print("[SENSORS] ");
-  // Serial.println(payload);
-
   publishState(MQTT_SENSORS_TOPIC, payload);
+}
+
+static void setupUartSensor()
+{
+  Serial2.begin(115200, SERIAL_8N1, UART_SENSOR_RX_PIN, UART_SENSOR_TX_PIN);
+}
+
+static bool tryReadJsonFloatField(const String &json, const char *fieldName, float &outValue)
+{
+  const String key = String("\"") + fieldName + "\"";
+  const int keyPos = json.indexOf(key);
+  if (keyPos < 0)
+  {
+    return false;
+  }
+
+  const int colonPos = json.indexOf(':', keyPos + key.length());
+  if (colonPos < 0)
+  {
+    return false;
+  }
+
+  int valueStart = colonPos + 1;
+  while (valueStart < json.length() && (json[valueStart] == ' ' || json[valueStart] == '\t' || json[valueStart] == '\n' || json[valueStart] == '\r'))
+  {
+    valueStart++;
+  }
+
+  int valueEnd = valueStart;
+  while (valueEnd < json.length())
+  {
+    const char c = json[valueEnd];
+    const bool isNumericChar = (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E';
+    if (!isNumericChar)
+    {
+      break;
+    }
+    valueEnd++;
+  }
+
+  if (valueEnd == valueStart)
+  {
+    return false;
+  }
+
+  outValue = json.substring(valueStart, valueEnd).toFloat();
+  return true;
+}
+
+static void publishUartSensorJson(uint32_t t,
+                                  float heading,
+                                  float accelX,
+                                  float accelY,
+                                  float accelZ,
+                                  float gyroZ,
+                                  float magX,
+                                  float magY,
+                                  float magZ,
+                                  bool hasRedOffset,
+                                  float redOffset)
+{
+  String payload = "{";
+  payload += "\"t\":" + String(t);
+  payload += ",\"hdg\":" + String(heading, 2);
+  payload += ",\"accel_x\":" + String(accelX, 2);
+  payload += ",\"accel_y\":" + String(accelY, 2);
+  payload += ",\"accel_z\":" + String(accelZ, 2);
+  payload += ",\"gyro_z\":" + String(gyroZ, 2);
+  payload += ",\"mag_x\":" + String(magX, 2);
+  payload += ",\"mag_y\":" + String(magY, 2);
+  payload += ",\"mag_z\":" + String(magZ, 2);
+  if (hasRedOffset)
+  {
+    payload += ",\"red_offset_to_blue_line\":" + String(redOffset, 3);
+  }
+  payload += "}";
+
+  publishState(MQTT_UART_SENSOR_TOPIC, payload);
+}
+
+static void processUartSensorLine(const String &line)
+{
+  StaticJsonDocument<512> doc;
+  const DeserializationError error = deserializeJson(doc, line);
+  if (error)
+  {
+    Serial.print("[UART] JSON Fehler: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  const bool imuReady = doc["ok"]["imu"] | false;
+  const bool magReady = doc["ok"]["mag"] | false;
+  if (!imuReady || !magReady)
+  {
+    return;
+  }
+
+  const uint32_t t = doc["t"] | 0;
+  const float heading = doc["mag"]["hdg"] | 0.0f;
+  const float accelX = doc["imu"]["accel"]["x"] | 0.0f;
+  const float accelY = doc["imu"]["accel"]["y"] | 0.0f;
+  const float accelZ = doc["imu"]["accel"]["z"] | 0.0f;
+  const float gyroZ = doc["imu"]["gyro"]["z"] | 0.0f;
+  const float magX = doc["mag"]["field"]["x"] | 0.0f;
+  const float magY = doc["mag"]["field"]["y"] | 0.0f;
+  const float magZ = doc["mag"]["field"]["z"] | 0.0f;
+
+  float redOffset = 0.0f;
+  const bool hasRedOffset = tryReadJsonFloatField(line, "red_offset_to_blue_line", redOffset);
+  if (hasRedOffset)
+  {
+    lastRedOffsetToBlueLine = redOffset;
+  }
+
+  Serial.printf("[UART] t=%lu hdg=%.1f gyro_z=%.2f\n", t, heading, gyroZ);
+
+  publishUartSensorJson(t, heading, accelX, accelY, accelZ, gyroZ, magX, magY, magZ, hasRedOffset, redOffset);
+  lastUartSensorReadMs = millis();
+}
+
+static void pollUartSensor()
+{
+  // if (!Serial2.available())
+  //   return;
+
+  // String line = Serial2.readStringUntil('\r');
+  // line.trim();
+  // Serial.print("[UART] Zeile empfangen: ");
+  // Serial.println(line);
+  // processUartSensorLine(line);
+  while (Serial2.available() > 0)
+  {
+    const char c = static_cast<char>(Serial2.read());
+    Serial.print(c);
+    if (c == '\n')
+    {
+      Serial.print("[UART] Zeile empfangen: ");
+      Serial.println(uartSensorLineBuffer);
+      uartSensorLineBuffer.trim();
+      if (!uartSensorLineBuffer.isEmpty())
+      {
+        Serial.print("[UART] Verarbeite Zeile: ");
+        Serial.println(uartSensorLineBuffer);
+        processUartSensorLine(uartSensorLineBuffer);
+      }
+      uartSensorLineBuffer = "";
+    }
+    else if (c != '\r')
+    {
+      uartSensorLineBuffer += c;
+      if (uartSensorLineBuffer.length() > 768)
+      {
+        Serial.println("[UART] Zeile zu lang, verwerfe");
+        Serial.println(uartSensorLineBuffer);
+        uartSensorLineBuffer = "";
+      }
+    }
+  }
 }
 
 static void mqttCallback(char *topic, byte *payload, unsigned int length)
@@ -168,6 +361,22 @@ static void mqttCallback(char *topic, byte *payload, unsigned int length)
       esc_L.writeMicroseconds(MOTOR_MIN);
       esc_R.writeMicroseconds(MOTOR_MIN);
       publishState(MQTT_STATUS_TOPIC, "motors stopped");
+    }
+    return;
+  }
+
+  if (strcmp(topic, MQTT_VISION_STATE_TOPIC) == 0)
+  {
+    float parsedOffset = 0.0f;
+    if (tryReadJsonFloatField(message, "red_offset_to_blue_line", parsedOffset))
+    {
+      lastRedOffsetToBlueLine = parsedOffset;
+      Serial.print("[VISION] red_offset_to_blue_line=");
+      Serial.println(lastRedOffsetToBlueLine, 3);
+    }
+    else
+    {
+      Serial.println("[VISION] Feld red_offset_to_blue_line nicht gefunden");
     }
   }
 }
@@ -238,6 +447,7 @@ static void connectToMqtt()
   {
     Serial.println("MQTT verbunden");
     mqttClient.subscribe(MQTT_COMMAND_TOPIC);
+    mqttClient.subscribe(MQTT_VISION_STATE_TOPIC);
     publishState(MQTT_STATUS_TOPIC, "online");
   }
   else
@@ -319,13 +529,6 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len)
       Serial.print(message.data.stick_data.y);
 
       driveEscFromStick(message.data.stick_data);
-      lastPacketReceivedMs = millis();
-      lastStickPacketReceivedMs = lastPacketReceivedMs;
-      // if (motorsStoppedByTimeout)
-      // {
-      //   motorsStoppedByTimeout = false;
-      //   publishState(MQTT_STATUS_TOPIC, "motors resumed");
-      // }
     }
     else if (message.msg_type == QUACK)
     {
@@ -357,14 +560,15 @@ void setup()
   WiFi.setSleep(false);
 
   setupSensorPins();
+  setupUartSensor();
+
+  pinMode(SWITCH_PIN, INPUT_PULLUP);
+  switchStableState = digitalRead(SWITCH_PIN);
+  switchLastReading = switchStableState;
+  switchLastDebounceMs = millis();
 
   connectToWiFi();
   delay(2000); // Delay for monitor
-
-  // Zur Information: Die MAC-Adresse des ESP32 wird hier ausgegeben,
-  // damit du sie für den Sender verwenden kannst
-  Serial.print("Empfänger MAC: ");
-  Serial.println(WiFi.macAddress());
 
   // Initialisiere ESP-NOW
   applyWifiChannel(getEspNowChannel());
@@ -414,6 +618,8 @@ void loop()
     mqttClient.loop();
   }
 
+  pollUartSensor();
+
   const unsigned long now = millis();
   if (now - lastSensorReadMs >= SENSOR_READ_INTERVAL_MS)
   {
@@ -421,17 +627,7 @@ void loop()
     readAndPublishSensors();
   }
 
-  // // Motoren stoppen, wenn seit PACKET_TIMEOUT_MS keine Fahrdaten mehr kamen
-  // if (lastStickPacketReceivedMs != 0 && (now - lastStickPacketReceivedMs > PACKET_TIMEOUT_MS))
-  // {
-  //   if (!motorsStoppedByTimeout)
-  //   {
-  //     esc_L.writeMicroseconds(MOTOR_MIN);
-  //     esc_R.writeMicroseconds(MOTOR_MIN);
-  //     motorsStoppedByTimeout = true;
-  //     publishState(MQTT_STATUS_TOPIC, "motors timeout");
-  //   }
-  // }
+  updateSwitchState();
 
-  delay(10);
+  // delay(1);
 }
