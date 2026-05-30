@@ -121,7 +121,7 @@ Both drift and intentional turning produce the same signature in those signals �
 What actually distinguishes them
 
 The real discriminator is whether you commanded the motion. The signal you're missing is the motor/steering output. Once you know that:
-
+```
 ┌──────────────────────────┬────────────────────┬────────────────────────────────────────────────┐
 │        Situation         │ Commanded steering │            Gyro.z / heading change             │
 ├──────────────────────────┼────────────────────┼────────────────────────────────────────────────┤
@@ -133,7 +133,7 @@ The real discriminator is whether you commanded the motion. The signal you're mi
 ├──────────────────────────┼────────────────────┼────────────────────────────────────────────────┤
 │ Turn complete, coasting  │ ~zero              │ small residual                                 │
 └──────────────────────────┴────────────────────┴────────────────────────────────────────────────┘
-
+```
 Drift is simply unexpected heading change — motion that occurs without a corresponding steering command.
 
 The standard solution: heading hold

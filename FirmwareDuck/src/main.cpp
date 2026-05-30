@@ -63,8 +63,9 @@ const char *MQTT_STICK_TOPIC    = "duck/stick";
 const char *MQTT_QUACK_TOPIC    = "duck/quack";
 const char *MQTT_COMMAND_TOPIC  = "duck/cmd";
 const char *MQTT_SENSORS_TOPIC  = "duck/sensors";
-const char *MQTT_GAINS_TOPIC    = "duck/gains";    // subscribe: {"kp":0.025,"kd":0.015,"dead_zone":5.0}
-const char *MQTT_HEADING_TOPIC  = "duck/heading";  // publish:  current heading state
+const char *MQTT_GAINS_TOPIC    = "duck/gains";      // subscribe: {"kp":0.025,"kd":0.015,"dead_zone":5.0}
+const char *MQTT_GAINS_ACK_TOPIC= "duck/gains/ack"; // publish:  clamped gains echo
+const char *MQTT_HEADING_TOPIC  = "duck/heading";   // publish:  current heading state
 
 // ── Heading controller ────────────────────────────────────────────────────────
 HeadingCtrl headingCtrl;
@@ -296,7 +297,7 @@ static void mqttCallback(char *topic, byte *payload, unsigned int length)
                  (double)headingCtrl.kp,
                  (double)headingCtrl.kd,
                  (double)headingCtrl.dead_zone);
-        mqttClient.publish(MQTT_GAINS_TOPIC "/ack", ack, false);
+        mqttClient.publish(MQTT_GAINS_ACK_TOPIC, ack, false);
     }
 }
 
