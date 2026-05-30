@@ -4,501 +4,532 @@
 #include <esp_wifi.h>
 #include <ESP32Servo.h>
 #include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include "common.h"
+#include "heading_ctrl.h"
 
+// ── Motor / ESC ───────────────────────────────────────────────────────────────
 Servo esc_L;
 Servo esc_R;
-WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
 
-const int X_MIN = 0;
-const int X_MAX = 4096;
-const int Y_MIN = 0;
-const int Y_MAX = 4096;
+const int MOTOR_MIN = 1000;
+const int MOTOR_MAX = 1600;
+const int Motor_R   = 16;
+const int Motor_L   =  4;
 
-const int MOTOR_MIN = 1000; // Minimaler PWM-Wert für die Motoren = stop
-const int MOTOR_MAX = 1600; // Maximaler PWM-Wert für die Motoren
+// ── Joystick axis config ──────────────────────────────────────────────────────
+const int   X_MIN            =    0;
+const int   X_MAX            = 4096;
+const int   Y_MIN            =    0;
+const int   Y_MAX            = 4096;
+const int   X_DEADZONE       =   80;
+const int   Y_DEADZONE       =   80;
+const int   X_NEUTRAL        = 1840;
+const int   Y_NEUTRAL        = 1880;
+const float STEERING_STRENGTH= 0.25f;
 
-const int X_DEADZONE = 80;  // Toter Bereich um die X-Nullstellung
-const int Y_DEADZONE = 80;  // Toter Bereich um die Y-Nullstellung
-const int X_NEUTRAL = 1840; // Gemessene X-Nullstellung
-const int Y_NEUTRAL = 1880; // Gemessene Y-Nullstellung
-const float STEERING_STRENGTH= 0.25; // WARNING: This is added to the MOTOR_MAX value!
-
-const int Motor_R = 16;
-const int Motor_L = 4;
-const uint8_t DEFAULT_ESPNOW_CHANNEL = 1;
-
-const char *WIFI_SSID = "Ducknet";
-const char *WIFI_PASSWORD = "Ducknet123";
-
-const char *MQTT_BROKER = "10.42.0.1";
-const uint16_t MQTT_PORT = 1883;
-const char *MQTT_CLIENT_ID = "duck-firmware";
-const char *MQTT_STATUS_TOPIC = "duck/status";
-const char *MQTT_STICK_TOPIC = "duck/stick";
-const char *MQTT_QUACK_TOPIC = "duck/quack";
-const char *MQTT_COMMAND_TOPIC = "duck/cmd";
-const char *MQTT_SENSORS_TOPIC = "duck/sensors";
-
+// ── Ultrasonic sensors ────────────────────────────────────────────────────────
 const int SENSOR_1_TRIG = 17;
-const int SENSOR_1_ECHO = 5;
+const int SENSOR_1_ECHO =  5;
 const int SENSOR_2_TRIG = 18;
 const int SENSOR_2_ECHO = 19;
 const int SENSOR_3_TRIG = 21;
 const int SENSOR_3_ECHO = 22;
 
 const unsigned long SENSOR_READ_INTERVAL_MS = 200;
-const unsigned long SENSOR_GAP_MS = 40;
+const unsigned long SENSOR_GAP_MS           =  40;
 
+// ── PSoC6 UART (from Infineon SensorDuck board) ───────────────────────────────
+// Wire: PSoC P9_1 (TX) → GPIO27   |   PSoC P9_0 (RX) ← GPIO26   |   GND ↔ GND
+#define PSOC_RX_PIN   27
+#define PSOC_TX_PIN   26
+#define PSOC_BAUD     115200
+
+// ── WiFi / MQTT ───────────────────────────────────────────────────────────────
+WiFiClient    wifiClient;
+PubSubClient  mqttClient(wifiClient);
+
+const uint8_t DEFAULT_ESPNOW_CHANNEL = 1;
+
+const char *WIFI_SSID     = "Ducknet";
+const char *WIFI_PASSWORD = "Ducknet123";
+
+const char *MQTT_BROKER   = "10.42.0.1";
+const uint16_t MQTT_PORT  = 1883;
+
+const char *MQTT_CLIENT_ID      = "duck-firmware";
+const char *MQTT_STATUS_TOPIC   = "duck/status";
+const char *MQTT_STICK_TOPIC    = "duck/stick";
+const char *MQTT_QUACK_TOPIC    = "duck/quack";
+const char *MQTT_COMMAND_TOPIC  = "duck/cmd";
+const char *MQTT_SENSORS_TOPIC  = "duck/sensors";
+const char *MQTT_GAINS_TOPIC    = "duck/gains";    // subscribe: {"kp":0.025,"kd":0.015,"dead_zone":5.0}
+const char *MQTT_HEADING_TOPIC  = "duck/heading";  // publish:  current heading state
+
+// ── Heading controller ────────────────────────────────────────────────────────
+HeadingCtrl headingCtrl;
+
+// Latest values from PSoC6 (updated by _drain_psoc_uart)
+static float g_heading     = NAN;   // tilt-compensated when possible, else raw mag.hdg
+static float g_heading_raw = NAN;   // simple 2-D mag.hdg for reference
+static float g_gyro_z      = 0.0f;  // yaw rate °/s from BMI270
+static bool  g_psoc_ok     = false;
+static unsigned long g_psoc_last_ms = 0;
+
+// ── Timing ────────────────────────────────────────────────────────────────────
 unsigned long lastMqttReconnectAttempt = 0;
-unsigned long lastSensorReadMs = 0;
-unsigned long lastPacketReceivedMs = 0;
-unsigned long lastStickPacketReceivedMs = 0;
-bool motorsStoppedByTimeout = false;
-const unsigned long PACKET_TIMEOUT_MS = 20000;
+unsigned long lastSensorReadMs         = 0;
+unsigned long lastHeadingPublishMs     = 0;
+unsigned long lastPacketReceivedMs     = 0;
+unsigned long lastStickPacketReceivedMs= 0;
 
+// ── Motor state ───────────────────────────────────────────────────────────────
+float currentMotorLeft  = 0.0f;
+float currentMotorRight = 0.0f;
+const float SECS_ZEROTOMAX  = 1.5f;
+float accelerating_for      = 0.0f;
+int   time_last_received    = 0;
+const int TIMEOUT_STOP_AFTER_RECV = 1000;
+float prev_millis = 0.0f;
+
+#define FULL 1000000
+#define bool_str(x) ((x) > 0 ? "TRUE" : "FALSE")
+
+// =============================================================================
+// WiFi / ESP-NOW helpers
+// =============================================================================
 static uint8_t getEspNowChannel()
 {
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    return WiFi.channel();
-  }
-
-  return DEFAULT_ESPNOW_CHANNEL;
+    return (WiFi.status() == WL_CONNECTED) ? WiFi.channel() : DEFAULT_ESPNOW_CHANNEL;
 }
 
 static void applyWifiChannel(uint8_t channel)
 {
-  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 }
 
 static void publishState(const char *topic, const String &payload)
 {
-  if (mqttClient.connected())
-  {
-    mqttClient.publish(topic, payload.c_str(), true);
-  }
+    if (mqttClient.connected())
+        mqttClient.publish(topic, payload.c_str(), true);
 }
 
+// =============================================================================
+// PSoC6 UART — non-blocking JSON line reader
+// =============================================================================
+static char _rx_buf[256];
+static int  _rx_pos = 0;
+
+static void _parse_psoc_line(const char *line)
+{
+    JsonDocument doc;
+    if (deserializeJson(doc, line) != DeserializationError::Ok) return;
+
+    bool imu_ok = doc["ok"]["imu"] | false;
+    bool mag_ok = doc["ok"]["mag"] | false;
+    if (!mag_ok) return;
+
+    float mag_hdg = doc["mag"]["hdg"]      | NAN;
+    float mx      = doc["mag"]["field"]["x"]| NAN;
+    float my      = doc["mag"]["field"]["y"]| NAN;
+    float mz      = doc["mag"]["field"]["z"]| NAN;
+    float ax      = doc["imu"]["accel"]["x"]| NAN;
+    float ay      = doc["imu"]["accel"]["y"]| NAN;
+    float az      = doc["imu"]["accel"]["z"]| NAN;
+    float gz      = doc["imu"]["gyro"]["z"] | 0.0f;
+
+    g_heading_raw = mag_hdg;
+    g_gyro_z      = gz;
+    g_psoc_ok     = true;
+    g_psoc_last_ms= millis();
+
+    // Prefer tilt-compensated heading when the IMU is valid
+    if (imu_ok && !isnan(ax) && !isnan(mx)) {
+        float th = HeadingCtrl::tilt_heading(ax, ay, az, mx, my, mz);
+        g_heading = isnan(th) ? mag_hdg : th;
+    } else {
+        g_heading = mag_hdg;
+    }
+}
+
+static void _drain_psoc_uart()
+{
+    while (Serial2.available()) {
+        char c = (char)Serial2.read();
+        if (c == '\n') {
+            if (_rx_pos > 0 && _rx_buf[_rx_pos - 1] == '\r') _rx_pos--;
+            _rx_buf[_rx_pos] = '\0';
+            if (_rx_pos > 0) _parse_psoc_line(_rx_buf);
+            _rx_pos = 0;
+        } else if (_rx_pos < (int)sizeof(_rx_buf) - 1) {
+            _rx_buf[_rx_pos++] = c;
+        } else {
+            _rx_pos = 0;  // buffer overflow — resync on next newline
+        }
+    }
+}
+
+// =============================================================================
+// Heading state → MQTT
+// =============================================================================
+static void _publish_heading()
+{
+    if (!mqttClient.connected()) return;
+
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+        "{\"hdg\":%.1f,\"hdg_raw\":%.1f,\"target\":%.1f,"
+        "\"gyro_z\":%.2f,\"enabled\":%s,"
+        "\"kp\":%.4f,\"kd\":%.4f,\"dz\":%.1f,"
+        "\"psoc_ok\":%s}",
+        (double)(isnan(g_heading)     ? -1.0f : g_heading),
+        (double)(isnan(g_heading_raw) ? -1.0f : g_heading_raw),
+        (double)(headingCtrl.target() < 0 ? -1.0f : headingCtrl.target()),
+        (double)g_gyro_z,
+        headingCtrl.enabled ? "true" : "false",
+        (double)headingCtrl.kp,
+        (double)headingCtrl.kd,
+        (double)headingCtrl.dead_zone,
+        g_psoc_ok ? "true" : "false");
+
+    mqttClient.publish(MQTT_HEADING_TOPIC, buf, false);
+}
+
+// =============================================================================
+// Ultrasonic sensors
+// =============================================================================
 static float readDistanceCm(int trigPin, int echoPin)
 {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  const unsigned long duration = pulseIn(echoPin, HIGH, 30000);
-  if (duration == 0)
-  {
-    return -1.0f;
-  }
-
-  return static_cast<float>(duration) * 0.0343f * 0.5f;
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+    unsigned long dur = pulseIn(echoPin, HIGH, 30000);
+    return (dur == 0) ? -1.0f : (float)dur * 0.0343f * 0.5f;
 }
 
-static void appendDistanceJsonValue(String &json, float distanceCm)
+static void appendDistanceJsonValue(String &json, float cm)
 {
-  if (distanceCm < 0.0f)
-  {
-    json += "null";
-  }
-  else
-  {
-    json += String(distanceCm, 1);
-  }
+    if (cm < 0.0f) json += "null";
+    else           json += String(cm, 1);
 }
 
 static void setupSensorPins()
 {
-  pinMode(SENSOR_1_TRIG, OUTPUT);
-  pinMode(SENSOR_1_ECHO, INPUT);
-  pinMode(SENSOR_2_TRIG, OUTPUT);
-  pinMode(SENSOR_2_ECHO, INPUT);
-  pinMode(SENSOR_3_TRIG, OUTPUT);
-  pinMode(SENSOR_3_ECHO, INPUT);
-
-  digitalWrite(SENSOR_1_TRIG, LOW);
-  digitalWrite(SENSOR_2_TRIG, LOW);
-  digitalWrite(SENSOR_3_TRIG, LOW);
+    pinMode(SENSOR_1_TRIG, OUTPUT); pinMode(SENSOR_1_ECHO, INPUT);
+    pinMode(SENSOR_2_TRIG, OUTPUT); pinMode(SENSOR_2_ECHO, INPUT);
+    pinMode(SENSOR_3_TRIG, OUTPUT); pinMode(SENSOR_3_ECHO, INPUT);
+    digitalWrite(SENSOR_1_TRIG, LOW);
+    digitalWrite(SENSOR_2_TRIG, LOW);
+    digitalWrite(SENSOR_3_TRIG, LOW);
 }
 
 static void readAndPublishSensors()
 {
-  const float distance1 = readDistanceCm(SENSOR_1_TRIG, SENSOR_1_ECHO);
-  delay(SENSOR_GAP_MS);
-  const float distance2 = readDistanceCm(SENSOR_2_TRIG, SENSOR_2_ECHO);
-  delay(SENSOR_GAP_MS);
-  const float distance3 = readDistanceCm(SENSOR_3_TRIG, SENSOR_3_ECHO);
+    float d1 = readDistanceCm(SENSOR_1_TRIG, SENSOR_1_ECHO); delay(SENSOR_GAP_MS);
+    float d2 = readDistanceCm(SENSOR_2_TRIG, SENSOR_2_ECHO); delay(SENSOR_GAP_MS);
+    float d3 = readDistanceCm(SENSOR_3_TRIG, SENSOR_3_ECHO);
 
-  String payload = "{";
-  payload += "\"sensor_1_cm\":";
-  appendDistanceJsonValue(payload, distance1);
-  payload += ",\"sensor_2_cm\":";
-  appendDistanceJsonValue(payload, distance2);
-  payload += ",\"sensor_3_cm\":";
-  appendDistanceJsonValue(payload, distance3);
-  payload += "}";
-
-  // Serial.print("[SENSORS] ");
-  // Serial.println(payload);
-
-  publishState(MQTT_SENSORS_TOPIC, payload);
+    String payload = "{";
+    payload += "\"sensor_1_cm\":"; appendDistanceJsonValue(payload, d1);
+    payload += ",\"sensor_2_cm\":"; appendDistanceJsonValue(payload, d2);
+    payload += ",\"sensor_3_cm\":"; appendDistanceJsonValue(payload, d3);
+    payload += "}";
+    publishState(MQTT_SENSORS_TOPIC, payload);
 }
 
+// =============================================================================
+// MQTT
+// =============================================================================
 static void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
-  Serial.print("[MQTT] Nachricht auf ");
-  Serial.print(topic);
-  Serial.print(": ");
+    String message;
+    message.reserve(length);
+    for (unsigned int i = 0; i < length; i++)
+        message += (char)payload[i];
 
-  String message;
-  for (unsigned int i = 0; i < length; i++)
-  {
-    message += static_cast<char>(payload[i]);
-  }
+    Serial.printf("[MQTT] %s: %s\n", topic, message.c_str());
 
-  Serial.println(message);
-
-  if (strcmp(topic, MQTT_COMMAND_TOPIC) == 0)
-  {
-    if (message == "stop")
-    {
-      esc_L.writeMicroseconds(MOTOR_MIN);
-      esc_R.writeMicroseconds(MOTOR_MIN);
-      publishState(MQTT_STATUS_TOPIC, "motors stopped");
+    // ── duck/cmd ─────────────────────────────────────────────────────────────
+    if (strcmp(topic, MQTT_COMMAND_TOPIC) == 0) {
+        if (message == "stop") {
+            esc_L.writeMicroseconds(MOTOR_MIN);
+            esc_R.writeMicroseconds(MOTOR_MIN);
+            publishState(MQTT_STATUS_TOPIC, "motors stopped");
+        } else if (message == "drift_on") {
+            headingCtrl.enabled = true;
+            headingCtrl.unlock();  // re-lock on current heading when next packet arrives
+            publishState(MQTT_STATUS_TOPIC, "drift correction ON");
+        } else if (message == "drift_off") {
+            headingCtrl.enabled = false;
+            headingCtrl.unlock();
+            publishState(MQTT_STATUS_TOPIC, "drift correction OFF");
+        }
+        return;
     }
-  }
+
+    // ── duck/gains ────────────────────────────────────────────────────────────
+    // Accepts JSON: {"kp":0.025,"kd":0.015,"dead_zone":5.0}
+    // Any missing key keeps its current value.
+    // Values outside safety limits are silently clamped (see heading_ctrl.h).
+    if (strcmp(topic, MQTT_GAINS_TOPIC) == 0) {
+        JsonDocument doc;
+        if (deserializeJson(doc, message) != DeserializationError::Ok) {
+            Serial.println("[MQTT] gains: bad JSON");
+            return;
+        }
+        float new_kp = doc["kp"]        | headingCtrl.kp;
+        float new_kd = doc["kd"]        | headingCtrl.kd;
+        float new_dz = doc["dead_zone"] | headingCtrl.dead_zone;
+        headingCtrl.set_gains(new_kp, new_kd, new_dz);
+
+        Serial.printf("[MQTT] gains → kp=%.4f kd=%.4f dz=%.1f\n",
+                      (double)headingCtrl.kp,
+                      (double)headingCtrl.kd,
+                      (double)headingCtrl.dead_zone);
+
+        // Echo clamped values back so the PC knows what was actually applied
+        char ack[96];
+        snprintf(ack, sizeof(ack),
+                 "{\"kp\":%.4f,\"kd\":%.4f,\"dead_zone\":%.1f}",
+                 (double)headingCtrl.kp,
+                 (double)headingCtrl.kd,
+                 (double)headingCtrl.dead_zone);
+        mqttClient.publish(MQTT_GAINS_TOPIC "/ack", ack, false);
+    }
 }
 
 static void connectToWiFi()
 {
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    return;
-  }
+    if (WiFi.status() == WL_CONNECTED) return;
 
-  Serial.print("Verbinde mit WiFi ");
-  Serial.println(WIFI_SSID);
-  WiFi.setSleep(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.printf("Connecting to WiFi %s\n", WIFI_SSID);
+    WiFi.setSleep(false);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000)
-  {
-    delay(500);
-    Serial.print('.');
-  }
-  Serial.println();
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+        delay(500); Serial.print('.');
+    }
+    Serial.println();
 
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    applyWifiChannel(getEspNowChannel());
-    Serial.print("WiFi verbunden, IP: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("Aktiver Kanal: ");
-    Serial.println(WiFi.channel());
-  }
-  else
-  {
-    Serial.println("WiFi Verbindungsfehler");
-  }
+    if (WiFi.status() == WL_CONNECTED) {
+        applyWifiChannel(getEspNowChannel());
+        Serial.printf("WiFi connected, IP: %s  channel: %d\n",
+                      WiFi.localIP().toString().c_str(), WiFi.channel());
+    } else {
+        Serial.println("WiFi connection failed");
+    }
 }
 
 static void connectToMqtt()
 {
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    return;
-  }
+    if (WiFi.status() != WL_CONNECTED || mqttClient.connected()) return;
 
-  if (mqttClient.connected())
-  {
-    return;
-  }
+    unsigned long now = millis();
+    if (now - lastMqttReconnectAttempt < 5000) return;
+    lastMqttReconnectAttempt = now;
 
-  const unsigned long now = millis();
-  if (now - lastMqttReconnectAttempt < 5000)
-  {
-    return;
-  }
-  lastMqttReconnectAttempt = now;
+    Serial.printf("Connecting to MQTT %s:%d\n", MQTT_BROKER, MQTT_PORT);
+    mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    mqttClient.setCallback(mqttCallback);
 
-  Serial.print("Verbinde mit MQTT Broker ");
-  Serial.print(MQTT_BROKER);
-  Serial.print(":");
-  Serial.println(MQTT_PORT);
-
-  mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
-  mqttClient.setCallback(mqttCallback);
-
-  if (mqttClient.connect(MQTT_CLIENT_ID))
-  {
-    Serial.println("MQTT verbunden");
-    mqttClient.subscribe(MQTT_COMMAND_TOPIC);
-    publishState(MQTT_STATUS_TOPIC, "online");
-  }
-  else
-  {
-    Serial.print("MQTT Verbindungsfehler, rc=");
-    Serial.println(mqttClient.state());
-  }
+    if (mqttClient.connect(MQTT_CLIENT_ID)) {
+        Serial.println("MQTT connected");
+        mqttClient.subscribe(MQTT_COMMAND_TOPIC);
+        mqttClient.subscribe(MQTT_GAINS_TOPIC);
+        publishState(MQTT_STATUS_TOPIC, "online");
+    } else {
+        Serial.printf("MQTT failed, rc=%d\n", mqttClient.state());
+    }
 }
 
-static int mapToEsc(int value, int inMin, int inMax)
-{
-  return constrain(map(value, inMin, inMax, MOTOR_MIN, MOTOR_MAX), MOTOR_MIN, MOTOR_MAX);
-}
-
-
-float currentMotorLeft = 0;
-float currentMotorRight = 0;
-const float SECS_ZEROTOMAX = 1.5;
-float accelerating_for = 0.0;
-// MOTOR_MIN
-int time_last_received;
-const int TIMEOUT_STOP_AFTER_RECV = 1000;
-
-// We don't have floating points, so this is for mapping like 0.0 to 1.0.
-#define FULL 1000000
-#define bool_str(x) (x > 0)? "TRUE":"FALSE" // For debug printing
-float prev_millis = 0;
+// =============================================================================
+// Motor drive  (called from ESP-NOW callback)
+// =============================================================================
 static void driveEscFromStick(const StickData &stickData)
 {
-  unsigned long mills = millis();
-  // For calculating acceleration based on time
-  float delta = (mills - prev_millis) / 1000.0;
-  prev_millis = mills;
-  accelerating_for += delta;
+    unsigned long mills = millis();
+    float delta = (mills - prev_millis) / 1000.0f;
+    prev_millis = mills;
+    accelerating_for += delta;
 
-  bool was_going_forward = currentMotorLeft >  0 && currentMotorRight >  0;
-  bool was_going_left    = currentMotorLeft <= 0 && currentMotorRight >  0;
-  bool was_going_right   = currentMotorLeft >  0 && currentMotorRight <= 0;
-  Serial.printf("Was going: forward: %s | left: %s | right: %s\n",
-      bool_str(was_going_forward),
-      bool_str(was_going_left),
-      bool_str(was_going_right)
-  );
+    if (mills - time_last_received > TIMEOUT_STOP_AFTER_RECV) {
+        accelerating_for = 0;
+    }
+    time_last_received = mills;
 
-  // Reset motors when not receiving anything for some time
-  // THIS DOES NOT WORK THE WAY WE THING IT DOES. THIS GETS EXECUTED ONLY ON THE PACKAGE AFTER A LONG PAUSE.
-  if (mills - time_last_received > TIMEOUT_STOP_AFTER_RECV) {
-    Serial.println("Didn't receive a package since a long time. Resetting acceleration.");
-    accelerating_for = 0;
-  }
-  time_last_received = mills;
+    const int x = stickData.x;
+    const int y = stickData.y;
 
-  // TODO: Gegenlenken wenn man aufhört, rechts zu lenken.
-  const int x = stickData.x;
-  const int y = stickData.y;
+    // ── Throttle ──────────────────────────────────────────────────────────────
+    float throttle = 0.0f;
+    if (y > Y_NEUTRAL + Y_DEADZONE) {
+        throttle = constrain(
+            map(y, Y_NEUTRAL + Y_DEADZONE, Y_MAX, 0, FULL), 0, FULL) / (float)FULL;
+    }
 
-  // Values sent by the remote. Ranges from 0 to 1
-  float goalMotorLeft  = 0;
-  float goalMotorRight = 0;
+    // ── Manual steering delta ─────────────────────────────────────────────────
+    float steeringDelta = 0.0f;
+    if (x < X_NEUTRAL - X_DEADZONE) {
+        steeringDelta = STEERING_STRENGTH *
+            (constrain(map(x, X_NEUTRAL - X_DEADZONE, X_MIN, 0, FULL), 0, FULL) / (float)FULL);
+    } else if (x > X_NEUTRAL + X_DEADZONE) {
+        steeringDelta = -STEERING_STRENGTH *
+            (constrain(map(x, X_NEUTRAL + X_DEADZONE, X_MAX, 0, FULL), 0, FULL) / (float)FULL);
+    }
 
-  /* Map data to motor direction */
-  bool is_going_left, is_going_right, is_going_forward;
-  float throttle = 0;
-  const float DIFF_BUFFER = 0.01;
-  if (y > Y_NEUTRAL + Y_DEADZONE) {
-    throttle      = constrain(map(y, Y_NEUTRAL + Y_DEADZONE, Y_MAX, 0, FULL), 0, FULL) / (float)FULL;
-    is_going_forward = throttle > DIFF_BUFFER;
-  }
-  float steeringDelta = 0;
-  // Driving left: goalMotorRight>LEAST
-  if (x < X_NEUTRAL - X_DEADZONE) {
-    steeringDelta =   STEERING_STRENGTH * (constrain(map(x, X_NEUTRAL - X_DEADZONE, X_MIN, 0, FULL), 0, FULL) / (float) FULL);
-    is_going_left = steeringDelta > DIFF_BUFFER;
-  }
-  // Driving right: goalMotorLeft>LEAST
-  else if (x > X_NEUTRAL + X_DEADZONE) {
-    steeringDelta = - STEERING_STRENGTH * (constrain(map(x, X_NEUTRAL + X_DEADZONE, X_MAX, 0, FULL), 0, FULL) / (float) FULL);
-    is_going_right = - steeringDelta > DIFF_BUFFER;
-  }
+    // ── Acceleration ramp ─────────────────────────────────────────────────────
+    const float E = 5.0f;
+    float accelProgress = constrain(pow(E, (accelerating_for / SECS_ZEROTOMAX) - 1), 0.0, (double)throttle);
+    float real_throttle = constrain(accelProgress, 0.0f, throttle);
 
-  // Add left/right direction to throttle
-  Serial.printf("THROT: %f | DELTA: %f\n", throttle, steeringDelta);
-  // Add steering speed as a bias, so we don't get negative values when turning
+    if (throttle <= 0.0f) accelerating_for = 0.0f;
 
-  // TODO: calc accel only onto throttle
-  // Accelerating
-  // TODO: if (was_going_left && not is_going_forward) ...
-  float E = 5;
-  // from 0 to 1.
-  float accelProgress = constrain(pow(E, (accelerating_for / SECS_ZEROTOMAX) - 1), 0.0, throttle);
-  Serial.printf("GOING: %f / %f | PROGRESS: %f\n", accelerating_for, SECS_ZEROTOMAX, accelProgress);
+    // ── Heading drift correction ───────────────────────────────────────────────
+    // Only active while moving forward. When the joystick is steering, the
+    // controller unlocks and re-locks the target heading once it returns to center.
+    float driftCorr = 0.0f;
+    bool  isManualSteering = (fabsf(steeringDelta) > 0.001f);
 
-  // The accelerated base speed + the full rotating speed
-  float real_throttle = constrain(accelProgress, 0, throttle);
-  // !!! So this might go _over_ the MOTOR_MAX value !!!
-  goalMotorLeft  = real_throttle - steeringDelta;
-  goalMotorRight = real_throttle + steeringDelta;
+    if (throttle > 0.05f) {
+        float hdg = isnan(g_heading) ? g_heading_raw : g_heading;
+        driftCorr = headingCtrl.update(hdg, g_gyro_z, isManualSteering)
+                    * STEERING_STRENGTH;
+    } else {
+        // Stopped — release the heading lock so it re-locks on the new heading
+        // when the duck starts moving again.
+        headingCtrl.unlock();
+    }
 
-  // TODO: Data for later
-  if (!is_going_forward) {
-    accelerating_for = 0;
-  }
+    // ── Mix and apply ─────────────────────────────────────────────────────────
+    float goalLeft  = real_throttle - steeringDelta - driftCorr;
+    float goalRight = real_throttle + steeringDelta + driftCorr;
 
-  Serial.printf("Is going: Forward: %s %f | Left: %s %f | Right: %s %f\n",
-      bool_str(is_going_forward), real_throttle,
-      bool_str(is_going_left),  goalMotorLeft,
-      bool_str(is_going_right), goalMotorRight
-  );
+    currentMotorLeft  = constrain(goalLeft,  0.0f, 1.0f + STEERING_STRENGTH);
+    currentMotorRight = constrain(goalRight, 0.0f, 1.0f + STEERING_STRENGTH);
 
-  currentMotorLeft  = constrain(goalMotorLeft, 0, 1.0 + STEERING_STRENGTH);
-  currentMotorRight = constrain(goalMotorRight, 0, 1.0 + STEERING_STRENGTH);
-  Serial.printf("Left Motor going at: %f %%  |\t  ", currentMotorLeft);
-  Serial.printf("Right Motor going at: %f %%\n", currentMotorRight);
+    esc_L.writeMicroseconds(MOTOR_MIN + (int)(currentMotorLeft  * (MOTOR_MAX - MOTOR_MIN)));
+    esc_R.writeMicroseconds(MOTOR_MIN + (int)(currentMotorRight * (MOTOR_MAX - MOTOR_MIN)));
 
-  esc_L.writeMicroseconds(MOTOR_MIN + currentMotorLeft  * (MOTOR_MAX - MOTOR_MIN));
-  esc_R.writeMicroseconds(MOTOR_MIN + currentMotorRight * (MOTOR_MAX - MOTOR_MIN));
+    Serial.printf("[DRIVE] thr=%.2f steer=%.3f drift=%.3f → L=%.2f R=%.2f\n",
+                  (double)real_throttle, (double)steeringDelta, (double)driftCorr,
+                  (double)currentMotorLeft, (double)currentMotorRight);
 
-  if (mqttClient.connected())
-  {
-    String payload = String("{\"x\":") + x + String(",\"y\":") + y + String(",\"left\":") + goalMotorLeft + String(",\"right\":") + goalMotorRight + String("}");
-    publishState(MQTT_STICK_TOPIC, payload);
-  }
+    if (mqttClient.connected()) {
+        char buf[96];
+        snprintf(buf, sizeof(buf),
+                 "{\"x\":%d,\"y\":%d,\"left\":%.3f,\"right\":%.3f,\"drift\":%.3f}",
+                 x, y, (double)goalLeft, (double)goalRight, (double)driftCorr);
+        mqttClient.publish(MQTT_STICK_TOPIC, buf, false);
+    }
 }
 
-// Callback-Funktion, die automatisch aufgerufen wird, wenn eine ESP-NOW-Nachricht empfangen wird
-// Sie erhält die MAC-Adresse des Senders und die empfangenen Daten.
+// =============================================================================
+// ESP-NOW receive callback
+// =============================================================================
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len)
 {
-  // MAC address des Senders ausgeben
-  Serial.print("[MSG] From: ");
-  print_mac_address(mac_addr);
+    Serial.print("[MSG] From: "); print_mac_address(mac_addr);
 
-  Serial.print(" | Message: ");
-  if (len >= static_cast<int>(sizeof(Message)))
-  {
+    if (len < (int)sizeof(Message)) {
+        Serial.printf(" | invalid length (%d)\n", len);
+        return;
+    }
+
     Message message;
     memcpy(&message, data, sizeof(Message));
+    Serial.printf("| %s", msg_type_name(message.msg_type));
 
-    Serial.print(msg_type_name(message.msg_type));
-
-    if (message.msg_type == STICK_DATA)
-    {
-      Serial.print(" x=");
-      Serial.print(message.data.stick_data.x);
-      Serial.print(", y=");
-      Serial.print(message.data.stick_data.y);
-
-      driveEscFromStick(message.data.stick_data);
-      lastPacketReceivedMs = millis();
-      lastStickPacketReceivedMs = lastPacketReceivedMs;
-      // if (motorsStoppedByTimeout)
-      // {
-      //   motorsStoppedByTimeout = false;
-      //   publishState(MQTT_STATUS_TOPIC, "motors resumed");
-      // }
+    if (message.msg_type == STICK_DATA) {
+        Serial.printf(" x=%d y=%d\n", message.data.stick_data.x, message.data.stick_data.y);
+        driveEscFromStick(message.data.stick_data);
+        lastPacketReceivedMs      = millis();
+        lastStickPacketReceivedMs = lastPacketReceivedMs;
+    } else if (message.msg_type == QUACK) {
+        Serial.printf(" i=%d\n", message.data.i);
+        if (mqttClient.connected())
+            publishState(MQTT_QUACK_TOPIC, String(message.data.i));
+        lastPacketReceivedMs = millis();
+    } else {
+        Serial.println();
     }
-    else if (message.msg_type == QUACK)
-    {
-      Serial.print(" i=");
-      Serial.print(message.data.i);
-
-      if (mqttClient.connected())
-      {
-        publishState(MQTT_QUACK_TOPIC, String(message.data.i));
-      }
-      lastPacketReceivedMs = millis();
-    }
-  }
-  else
-  {
-    Serial.print("ungültige Länge (");
-    Serial.print(len);
-    Serial.print(")");
-  }
-
-  Serial.print(" ");
-  Serial.println();
 }
 
-// Initialisierung des ESP32
+// =============================================================================
+// Setup
+// =============================================================================
 void setup()
 {
-  Serial.begin(115200);
-  WiFi.setSleep(false);
+    Serial.begin(115200);
+    WiFi.setSleep(false);
 
-  setupSensorPins();
+    setupSensorPins();
+    connectToWiFi();
+    delay(2000);
 
-  connectToWiFi();
-  delay(2000); // Delay for monitor
+    Serial.printf("Receiver MAC: %s\n", WiFi.macAddress().c_str());
 
-  // Zur Information: Die MAC-Adresse des ESP32 wird hier ausgegeben,
-  // damit du sie für den Sender verwenden kannst
-  Serial.print("Empfänger MAC: ");
-  Serial.println(WiFi.macAddress());
+    applyWifiChannel(getEspNowChannel());
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("ESP-NOW init failed");
+        while (true) delay(1000);
+    }
+    esp_now_register_recv_cb(OnDataRecv);
+    Serial.println("ESP-NOW ready");
 
-  // Initialisiere ESP-NOW
-  applyWifiChannel(getEspNowChannel());
-  if (esp_now_init() != ESP_OK)
-  {
-    Serial.println("ESP-NOW Fehler");
-    while (true)
-      delay(1000);
-  }
+    esc_L.attach(Motor_L, 1000, 2000);
+    esc_R.attach(Motor_R, 1000, 2000);
+    esc_L.writeMicroseconds(MOTOR_MIN);
+    esc_R.writeMicroseconds(MOTOR_MIN);
 
-  // Registriere die Callback-Funktion, die aufgerufen wird, wenn Daten empfangen werden
-  // OnDataRecv wird automatisch aufgerufen, wenn eine ESP-NOW-Nachricht ankommt
-  esp_now_register_recv_cb(OnDataRecv);
+    // PSoC6 sensor UART — must set RX buffer before begin()
+    Serial2.setRxBufferSize(512);
+    Serial2.begin(PSOC_BAUD, SERIAL_8N1, PSOC_RX_PIN, PSOC_TX_PIN);
+    Serial.printf("PSoC6 UART ready (RX=GPIO%d, TX=GPIO%d)\n", PSOC_RX_PIN, PSOC_TX_PIN);
 
-  // Bestätige, dass der Empfänger bereit ist
-  Serial.println("Empfänger bereit");
+    mqttClient.setBufferSize(512);
+    connectToMqtt();
 
-  esc_L.attach(Motor_L, 1000, 2000);
-  esc_R.attach(Motor_R, 1000, 2000);
-
-  esc_L.writeMicroseconds(1000);
-  esc_R.writeMicroseconds(1000);
-
-  mqttClient.setBufferSize(256);
-  connectToMqtt();
-
-  delay(3000);
+    delay(3000);
+    Serial.println("Ready. Publish to duck/gains to tune, duck/cmd drift_on to enable.");
 }
 
+// =============================================================================
+// Loop
+// =============================================================================
 void loop()
 {
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    connectToWiFi();
-  }
-  else
-  {
-    applyWifiChannel(getEspNowChannel());
-  }
+    // WiFi / MQTT keepalive
+    if (WiFi.status() != WL_CONNECTED) {
+        connectToWiFi();
+    } else {
+        applyWifiChannel(getEspNowChannel());
+    }
 
-  if (!mqttClient.connected())
-  {
-    connectToMqtt();
-  }
-  else
-  {
-    mqttClient.loop();
-  }
+    if (!mqttClient.connected()) {
+        connectToMqtt();
+    } else {
+        mqttClient.loop();
+    }
 
-  const unsigned long now = millis();
-  if (now - lastSensorReadMs >= SENSOR_READ_INTERVAL_MS)
-  {
-    lastSensorReadMs = now;
-    readAndPublishSensors();
-  }
+    // Drain PSoC UART — updates g_heading, g_gyro_z
+    _drain_psoc_uart();
 
-  // // Motoren stoppen, wenn seit PACKET_TIMEOUT_MS keine Fahrdaten mehr kamen
-  // if (lastStickPacketReceivedMs != 0 && (now - lastStickPacketReceivedMs > PACKET_TIMEOUT_MS))
-  // {
-  //   if (!motorsStoppedByTimeout)
-  //   {
-  //     esc_L.writeMicroseconds(MOTOR_MIN);
-  //     esc_R.writeMicroseconds(MOTOR_MIN);
-  //     motorsStoppedByTimeout = true;
-  //     publishState(MQTT_STATUS_TOPIC, "motors timeout");
-  //   }
-  // }
+    // Ultrasonic sensors (blocking ~80 ms when active — every 200 ms)
+    unsigned long now = millis();
+    if (now - lastSensorReadMs >= SENSOR_READ_INTERVAL_MS) {
+        lastSensorReadMs = now;
+        readAndPublishSensors();
+    }
 
-  delay(10);
+    // Publish heading state ~1 Hz for monitoring / compass_viewer cross-check
+    if (now - lastHeadingPublishMs >= 1000) {
+        lastHeadingPublishMs = now;
+        _publish_heading();
+    }
+
+    delay(10);
 }
