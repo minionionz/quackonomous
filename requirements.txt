@@ -3,3 +3,5 @@ flask-socketio
 simple-websocket
 opencv-python
 numpy
+matplotlib
+pyserial
