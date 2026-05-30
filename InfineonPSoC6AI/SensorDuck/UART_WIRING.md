@@ -63,8 +63,6 @@ void onSensorLine(const char* line) {
     // … use values
     Serial.printf("hdg=%.1f  gyro_z=%.2f\n", heading, gyro_z);
 }
-<<<<<<< Updated upstream
-=======
 
 void loop() {
     // Drain everything available this tick — never blocks
@@ -90,7 +88,6 @@ void loop() {
 
     // … rest of your loop (motors, ESP-NOW, etc.)
 }
->>>>>>> Stashed changes
 ```
 
 A few things to note:
@@ -100,7 +97,6 @@ A few things to note:
 - JsonDocument (no size parameter) is ArduinoJson 7. If you're on v6 use StaticJsonDocument<256> doc; instead.
 - For steering you'll mostly care about mag.hdg (where are we pointing) and imu.gyro.z (how fast are we turning). The accel and mag field X/Y/Z are there when you want tilt compensation later.
 
-<<<<<<< Updated upstream
 ## Magnet data hints
 
 ### Why does mag.field have X/Y/Z?
@@ -110,7 +106,6 @@ The magnetometer measures the full 3D magnetic field vector, not a heading direc
 field.z (the vertical dip component) lets the ESP32 do tilt-compensated heading by combining all three magnetic field components with the IMU accelerometer. The formula rotates the magnetic vector out of the tilted frame back into the horizontal plane before computing the angle. Without Z you can't do that.
 
 So the short version: hdg is the fast and easy bearing, fine for calm water. If you want accurate heading while the duck is rocking, the ESP32 can compute a corrected heading from field.x/y/z + imu.accel.x/y/z.
-=======
 ## Thoughts about "Regelung"
 ❯ Can we use the degree data and its derivative to differentiate degree changes coming from floating on the water from degree changes coming from turning left or right? Is this a good way to differentiate these two kinds of motions or are there better ones (we only want to counteract drifts to the sides while driving and not the usual floating)?
 
@@ -188,4 +183,3 @@ The heading-hold PD loop above is the right call. It's ~20 lines on the ESP32, w
 The compass viewer derivative plot is still useful for tuning: if you see the amber line oscillating while the duck is supposed to go straight, that's wave noise you need to dead-zone out. If it slowly ramps in one direction without a joystick command, that's drift your heading hold will correct.
 
 ✻ Sautéed for 52s
->>>>>>> Stashed changes
