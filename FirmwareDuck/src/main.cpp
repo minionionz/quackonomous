@@ -62,13 +62,11 @@ const unsigned long SENSOR_GAP_MS = 40;
 
 unsigned long lastMqttReconnectAttempt = 0;
 unsigned long lastSensorReadMs = 0;
-unsigned long lastUartSensorReadMs = 0;
 unsigned long lastPacketReceivedMs = 0;
 float lastRedOffsetToBlueLine = 0.0f;
 bool switchStableState = HIGH;
 bool switchLastReading = HIGH;
 unsigned long switchLastDebounceMs = 0;
-String uartSensorLineBuffer;
 
 static uint8_t getEspNowChannel()
 {
@@ -183,6 +181,8 @@ static void readAndPublishSensors()
 
 static void setupUartSensor()
 {
+  Serial2.setTimeout(25);
+  Serial2.setRxBufferSize(512);
   Serial2.begin(115200, SERIAL_8N1, UART_SENSOR_RX_PIN, UART_SENSOR_TX_PIN);
 }
 
@@ -262,6 +262,7 @@ static void publishUartSensorJson(uint32_t t,
 static void processUartSensorLine(const String &line)
 {
   StaticJsonDocument<512> doc;
+  Serial.println("[UART] Empfangene Zeile: " + line);
   const DeserializationError error = deserializeJson(doc, line);
   if (error)
   {
@@ -297,47 +298,23 @@ static void processUartSensorLine(const String &line)
   Serial.printf("[UART] t=%lu hdg=%.1f gyro_z=%.2f\n", t, heading, gyroZ);
 
   publishUartSensorJson(t, heading, accelX, accelY, accelZ, gyroZ, magX, magY, magZ, hasRedOffset, redOffset);
-  lastUartSensorReadMs = millis();
 }
 
 static void pollUartSensor()
 {
-  // if (!Serial2.available())
-  //   return;
-
-  // String line = Serial2.readStringUntil('\r');
-  // line.trim();
-  // Serial.print("[UART] Zeile empfangen: ");
-  // Serial.println(line);
-  // processUartSensorLine(line);
-  while (Serial2.available() > 0)
+  if (!Serial2.available())
   {
-    const char c = static_cast<char>(Serial2.read());
-    Serial.print(c);
-    if (c == '\n')
-    {
-      Serial.print("[UART] Zeile empfangen: ");
-      Serial.println(uartSensorLineBuffer);
-      uartSensorLineBuffer.trim();
-      if (!uartSensorLineBuffer.isEmpty())
-      {
-        Serial.print("[UART] Verarbeite Zeile: ");
-        Serial.println(uartSensorLineBuffer);
-        processUartSensorLine(uartSensorLineBuffer);
-      }
-      uartSensorLineBuffer = "";
-    }
-    else if (c != '\r')
-    {
-      uartSensorLineBuffer += c;
-      if (uartSensorLineBuffer.length() > 768)
-      {
-        Serial.println("[UART] Zeile zu lang, verwerfe");
-        Serial.println(uartSensorLineBuffer);
-        uartSensorLineBuffer = "";
-      }
-    }
+    return;
   }
+
+  String line = Serial2.readStringUntil('\n');
+  line.trim();
+  if (line.isEmpty())
+  {
+    return;
+  }
+
+  processUartSensorLine(line);
 }
 
 static void mqttCallback(char *topic, byte *payload, unsigned int length)
