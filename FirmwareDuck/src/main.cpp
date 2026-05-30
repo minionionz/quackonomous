@@ -256,31 +256,26 @@ static int mapToEsc(int value, int inMin, int inMax)
 float currentMotorLeft = 0;
 float currentMotorRight = 0;
 const float SECS_ZEROTOMAX = 1.5;
-float accelerating_for = 0.0;
-// MOTOR_MIN
-int time_last_received;
+const float E = 5; // Acceleration curve.
+
 const int TIMEOUT_STOP_AFTER_RECV = 1000;
+float accelerating_for = 0.0;
+int time_last_received;
+
+const float DIFF_BUFFER = 0.01;
 
 // We don't have floating points, so this is for mapping like 0.0 to 1.0.
 #define FULL 1000000
-#define bool_str(x) (x > 0)? "TRUE":"FALSE" // For debug printing
+#define bool_str(x) (x > 0)? "✅":"❌" // For debug printing
 float prev_millis = 0;
 static void driveEscFromStick(const StickData &stickData)
 {
+  Serial.println();
   unsigned long mills = millis();
   // For calculating acceleration based on time
   float delta = (mills - prev_millis) / 1000.0;
   prev_millis = mills;
   accelerating_for += delta;
-
-  bool was_going_forward = currentMotorLeft >  0 && currentMotorRight >  0;
-  bool was_going_left    = currentMotorLeft <= 0 && currentMotorRight >  0;
-  bool was_going_right   = currentMotorLeft >  0 && currentMotorRight <= 0;
-  Serial.printf("Was going: forward: %s | left: %s | right: %s\n",
-      bool_str(was_going_forward),
-      bool_str(was_going_left),
-      bool_str(was_going_right)
-  );
 
   // Reset motors when not receiving anything for some time
   // THIS DOES NOT WORK THE WAY WE THING IT DOES. THIS GETS EXECUTED ONLY ON THE PACKAGE AFTER A LONG PAUSE.
@@ -301,45 +296,54 @@ static void driveEscFromStick(const StickData &stickData)
   /* Map data to motor direction */
   bool is_going_left, is_going_right, is_going_forward;
   float throttle = 0;
-  const float DIFF_BUFFER = 0.01;
   if (y > Y_NEUTRAL + Y_DEADZONE) {
     throttle      = constrain(map(y, Y_NEUTRAL + Y_DEADZONE, Y_MAX, 0, FULL), 0, FULL) / (float)FULL;
     is_going_forward = throttle > DIFF_BUFFER;
   }
   float steeringDelta = 0;
+  Serial.printf("X: %d | XMAX: %d | MAP: %f\n", x, X_MAX, map(x, X_NEUTRAL + X_DEADZONE, X_MAX, 0, FULL) / (float) FULL);
   // Driving left: goalMotorRight>LEAST
   if (x < X_NEUTRAL - X_DEADZONE) {
-    steeringDelta =   STEERING_STRENGTH * (constrain(map(x, X_NEUTRAL - X_DEADZONE, X_MIN, 0, FULL), 0, FULL) / (float) FULL);
+    steeringDelta = STEERING_STRENGTH * (constrain(map(x, X_NEUTRAL - X_DEADZONE, X_MIN, 0, FULL), 0, FULL) / (float) FULL);
     is_going_left = steeringDelta > DIFF_BUFFER;
   }
   // Driving right: goalMotorLeft>LEAST
   else if (x > X_NEUTRAL + X_DEADZONE) {
-    steeringDelta = - STEERING_STRENGTH * (constrain(map(x, X_NEUTRAL + X_DEADZONE, X_MAX, 0, FULL), 0, FULL) / (float) FULL);
-    is_going_right = - steeringDelta > DIFF_BUFFER;
+    // Needs a negative sign for some reason
+    steeringDelta  = STEERING_STRENGTH * (constrain(-map(x, X_NEUTRAL + X_DEADZONE, X_MAX, 0, FULL), 0, FULL) / (float) FULL);
+    is_going_right = steeringDelta > DIFF_BUFFER;
   }
-
-  // Add left/right direction to throttle
   Serial.printf("THROT: %f | DELTA: %f\n", throttle, steeringDelta);
-  // Add steering speed as a bias, so we don't get negative values when turning
 
-  // TODO: calc accel only onto throttle
+  // // EXPERIMENTAL steering stabilizer. 
+  // if (was_going_left && not is_going_left && not is_going_right) {
+  //   steeringDelta -= - STEERING_STRENGTH * 0.5;
+  // } else if (was_going_right && not is_going_right && not is_going_left) {
+  //   steeringDelta += STEERING_STRENGTH * 0.5;
+  // }
+
   // Accelerating
-  // TODO: if (was_going_left && not is_going_forward) ...
-  float E = 5;
   // from 0 to 1.
   float accelProgress = constrain(pow(E, (accelerating_for / SECS_ZEROTOMAX) - 1), 0.0, throttle);
   Serial.printf("GOING: %f / %f | PROGRESS: %f\n", accelerating_for, SECS_ZEROTOMAX, accelProgress);
 
   // The accelerated base speed + the full rotating speed
   float real_throttle = constrain(accelProgress, 0, throttle);
+  // Add left/right direction to throttle
   // !!! So this might go _over_ the MOTOR_MAX value !!!
-  goalMotorLeft  = real_throttle - steeringDelta;
-  goalMotorRight = real_throttle + steeringDelta;
 
-  // TODO: Data for later
-  if (!is_going_forward) {
+  if (!is_going_forward) 
     accelerating_for = 0;
-  }
+
+  float steering_bias = 0;
+  if (!is_going_forward && (is_going_left || is_going_right))
+    steering_bias = STEERING_STRENGTH;
+
+  if (is_going_right)
+    steeringDelta *= (-1);
+
+  goalMotorLeft  = steering_bias + real_throttle - steeringDelta;
+  goalMotorRight = steering_bias + real_throttle + steeringDelta;
 
   Serial.printf("Is going: Forward: %s %f | Left: %s %f | Right: %s %f\n",
       bool_str(is_going_forward), real_throttle,
@@ -354,6 +358,16 @@ static void driveEscFromStick(const StickData &stickData)
 
   esc_L.writeMicroseconds(MOTOR_MIN + currentMotorLeft  * (MOTOR_MAX - MOTOR_MIN));
   esc_R.writeMicroseconds(MOTOR_MIN + currentMotorRight * (MOTOR_MAX - MOTOR_MIN));
+
+  bool was_going_forward = is_going_forward;
+  bool was_going_left    = is_going_left;
+  bool was_going_right   = is_going_right;
+
+  Serial.printf("WAS going: Forward: %s | Left: %s | Right: %s \n",
+      bool_str(was_going_forward),
+      bool_str(was_going_left),
+      bool_str(was_going_right)
+  );
 
   if (mqttClient.connected())
   {
