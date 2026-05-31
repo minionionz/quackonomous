@@ -85,10 +85,10 @@ VERBOSE=
 # ... then code in directories named COMPONENT_foo and COMPONENT_bar will be
 # added to the build
 #
-COMPONENTS=
+COMPONENTS=FREERTOS MBEDTLS LWIP WIFI_INTERFACE_SDIO SECURE_SOCKETS
 
 # Like COMPONENTS, but disable optional code that was enabled by default.
-DISABLE_COMPONENTS=
+DISABLE_COMPONENTS=MW_CY_MBEDTLS_ACCELERATION
 
 # By default the build system automatically looks in the Makefile's directory
 # tree for source code and builds it. The SOURCES variable can be used to
@@ -101,7 +101,7 @@ SOURCES=
 INCLUDES=
 
 # Add additional defines to the build process (without a leading -D).
-DEFINES=
+DEFINES=MBEDTLS_USER_CONFIG_FILE='"mbedtls_user_config.h"' CYBSP_WIFI_CAPABLE CY_RTOS_AWARE
 
 # Select softfp or hardfp floating point. Default is softfp.
 VFP_SELECT=
@@ -110,7 +110,7 @@ VFP_SELECT=
 #
 # NOTE: Includes and defines should use the INCLUDES and DEFINES variable
 # above.
-CFLAGS=
+CFLAGS=-Wno-implicit-function-declaration
 
 # Additional / custom C++ compiler flags.
 #
@@ -125,7 +125,7 @@ CXXFLAGS=
 ASFLAGS=
 
 # Additional / custom linker flags.
-LDFLAGS=
+LDFLAGS=-Wl,--allow-multiple-definition
 
 # Additional / custom libraries to link in to the application.
 LDLIBS=
